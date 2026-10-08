@@ -1,0 +1,61 @@
+# 这个 ID 同时用于 Windows 应用身份。
+# 发布后尽量不要修改，否则后续安装包可能被 Windows 视为另一个应用。
+appId: com.pickword.desktop
+productName: PickWord
+
+directories:
+  buildResources: build
+
+# 沿用 electron-vite 脚手架的排除规则。
+# 特别排除开发机 backend.json，避免把 D:/... 的本机路径装进发布包。
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!resources/backend.json'
+
+# 只保留简体中文和英文的 Chromium/Electron locale。
+electronLanguages:
+  - zh-CN
+  - en-US
+
+win:
+  executableName: PickWord
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  # false = 标准分步安装向导，而非一键安装。
+  oneClick: false
+
+  # 默认按当前用户安装，不强制要求管理员权限。
+  perMachine: false
+  selectPerMachineByDefault: false
+
+  # 标准向导下允许选择程序安装目录。
+  allowToChangeInstallationDirectory: true
+
+  # 安装器保留中英文；默认按系统语言选择，不额外弹出语言选择框。
+  multiLanguageInstaller: true
+  installerLanguages:
+    - zh_CN
+    - en_US
+  displayLanguageSelector: false
+
+  artifactName: PickWord-${version}-win-x64-setup.${ext}
+  shortcutName: PickWord
+  uninstallDisplayName: PickWord
+  createDesktopShortcut: always
+  runAfterFinish: true
+
+npmRebuild: false
+
+# 你当前使用 electron-builder 26，所以保留 v26 的 electronDownload 写法。
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
