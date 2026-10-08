@@ -8,6 +8,8 @@ PickWord 是一款面向写作者的 Windows 本地写作软件。它不是“�
 
 **当前版本是功能 Demo，正在进行安装体验与硬件兼容性测试。**
 
+<img width="1479" height="1009" alt="image" src="https://github.com/user-attachments/assets/d13f3419-027d-41d5-9a10-afbbaaea0d9d" />
+
 
 ## 下载安装
 
