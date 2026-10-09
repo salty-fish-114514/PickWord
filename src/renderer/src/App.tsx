@@ -196,6 +196,8 @@ function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSave, onSa
   const [candidateOpen, setCandidateOpen] = useState(false);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [candidateError, setCandidateError] = useState<string | null>(null);
+  /** 空候选提示：模型这次没给出可插入的词，不是故障。 */
+  const [candidateNotice, setCandidateNotice] = useState<string | null>(null);
   const [candidatePosition, setCandidatePosition] = useState<{ left: number; top: number } | null>(null);
   const [peekActive, setPeekActive] = useState(false);
   const [prefillChars, setPrefillChars] = useState(0);
@@ -412,6 +414,7 @@ function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSave, onSa
     setCandidateOpen(false);
     setCandidateLoading(false);
     setCandidateError(null);
+    setCandidateNotice(null);
     setCandidateList([]);
     setGlobalIndex(0);
   }
@@ -503,7 +506,26 @@ function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSave, onSa
         setCandidateList(usable);
         setGlobalIndex(0);
         setCandidateLoading(false);
-        setCandidateOpen(usable.length > 0 || job.quick);
+
+        if (usable.length === 0) {
+          // 模型把结束符排在了第一位（常见于刚推进滑窗、或一句话刚好写完）。
+          // 这不是故障：继续写、甚至改一个字，下次请求通常就正常了。
+          setCandidateNotice("模型暂时没有推荐候选，继续写就好。");
+          setCandidateOpen(true);
+          // 普通模式下浮层不常驻：显示三秒后自动收起（4000）
+          if (!job.quick) {
+            flash(
+              "empty-notice",
+              () => {},
+              () => { setCandidateOpen(false); setCandidateNotice(null); },
+              3000,
+            );
+          }
+        } else {
+          setCandidateNotice(null);
+          setCandidateOpen(true);
+        }
+
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || inFlightRef.current !== controller) return;
@@ -1682,6 +1704,7 @@ function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSave, onSa
           selectedIndex={localIndex}
           loading={candidateLoading}
           error={candidateError}
+          notice={candidateNotice}
           page={page}
           pageCount={pageCount}
           totalCount={candidateList.length}

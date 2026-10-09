@@ -3321,3 +3321,9 @@ kbd { font-size: calc(9px * var(--ui-scale)); min-width: calc(15px * 1.4); heigh
   border-radius: 4px;
   transition: width 0.3s;
 }
+
+.candidate-notice-message {
+  color: #7a6e5f;
+  font-size: 13px;
+  padding: 12px 16px;
+}

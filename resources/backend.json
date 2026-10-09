@@ -1,0 +1,14 @@
+{
+  "exe": "D:/llama-b8868-bin-win-hip-radeon-x64/llama-server.exe",
+  "model": "D:\\PickWordData\\Qwen3.5-9B-Q4_K_M.gguf",
+  "port": 18765,
+  "args": [
+    "-c",
+    "16384",
+    "-t",
+    "6",
+    "-fa",
+    "on"
+  ],
+  "startupTimeoutSec": 600
+}

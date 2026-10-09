@@ -203,10 +203,19 @@ function parseRequest(raw: unknown): CandidateRequest {
 /** 把 llama-server 的响应整理成 Candidate[]。新旧两种响应格式都兼容。 */
 function mapCandidates(data: unknown, meta: TokenMeta, topK: number): Candidate[] {
   const probsList = isObj(data) ? data.completion_probabilities : undefined
-  const first = Array.isArray(probsList) ? probsList[0] : undefined
-  if (!isObj(first)) {
-    throw new Error('llama-server 响应中没有 completion_probabilities，请确认 n_probs 生效')
+  
+  if (!Array.isArray(probsList)) {
+    throw new Error('llama-server 响应中缺少 completion_probabilities 字段')
   }
+  
+  // 核心修复：如果模型直接生成了结束符，数组就是空的，这里直接返回空候选即可，不要报错。
+  if (probsList.length === 0) {
+    return []
+  }
+
+  const first = probsList[0]
+  if (!isObj(first)) return []
+
   const list: unknown[] = Array.isArray(first.top_logprobs)
     ? first.top_logprobs // 新版格式
     : Array.isArray(first.probs)

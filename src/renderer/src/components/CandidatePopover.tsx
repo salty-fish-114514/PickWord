@@ -8,23 +8,17 @@ const REBUILD_HINT_CHARS = 400;
 interface CandidatePopoverProps {
   panelRef: RefObject<HTMLDivElement | null>;
   position: { left: number; top: number } | null;
-  /** 当前页要展示的候选（已由 App 切好片）。 */
   visible: Candidate[];
-  /** 当前页内被高亮的索引。 */
   selectedIndex: number;
   loading: boolean;
   error: string | null;
+  /** 空候选时的中性提示（不是故障）。和 error 互斥使用。 */
+  notice: string | null;
   page: number;
   pageCount: number;
   totalCount: number;
-  /**
-   * 浮层是否处于「淡化」状态：长按穿透键，或（开启「浮窗常驻」时）输入法正在组字。
-   * 淡化时浮层按设置的透明度显示，并且不响应鼠标，也不会拦截任何按键。
-   */
   faded: boolean;
-  /** 本次请求与上一次相比，大约有多少字的 prompt 前缀无法命中缓存。 */
   prefillChars: number;
-  /** 底栏快捷键提示用。 */
   peekKeyLabel: string;
   sampleKeyLabel: string;
   onHover: (index: number) => void;
@@ -32,12 +26,6 @@ interface CandidatePopoverProps {
   onRetry: () => void;
 }
 
-/**
- * 候选浮层（输入法候选框风格）。
- *
- * 它是一个「纯展示」组件：所有键盘逻辑都在 App 里，
- * 这样 textarea 的焦点永远不会被浮层抢走（注意每个按钮都 preventDefault 了 mousedown）。
- */
 export function CandidatePopover({
   panelRef,
   position,
@@ -45,6 +33,7 @@ export function CandidatePopover({
   selectedIndex,
   loading,
   error,
+  notice,
   page,
   pageCount,
   totalCount,
@@ -67,7 +56,6 @@ export function CandidatePopover({
       style={{
         left: position?.left ?? 0,
         top: position?.top ?? 0,
-        // 第一帧还没量出坐标时先隐藏，避免浮层从左上角「闪」一下。
         visibility: position ? "visible" : "hidden",
       }}
     >
@@ -98,6 +86,10 @@ export function CandidatePopover({
             重试
           </button>
         </div>
+      ) : visible.length === 0 && notice ? (
+        <div className="candidate-message candidate-notice-message">
+          <span>{notice}</span>
+        </div>
       ) : visible.length === 0 ? (
         <div className="candidate-message">暂时没有候选词</div>
       ) : (
@@ -109,7 +101,6 @@ export function CandidatePopover({
               aria-selected={selectedIndex === index}
               className={`candidate-row ${selectedIndex === index ? "is-selected" : ""}`}
               key={`${candidate.text}-${page}-${index}`}
-              // 阻止 mousedown 的默认行为 = 不让 textarea 失去焦点
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => onHover(index)}
               onClick={() => onPick(index)}
@@ -118,7 +109,6 @@ export function CandidatePopover({
               <span className="candidate-word">{candidate.text === "\n" ? "↵ 换行" : candidate.text}</span>
               <span className="candidate-probability">
                 <span className="probability-track">
-                  {/* 概率条做了放大：软化后的概率普遍在 1%~8%，直接用百分比会看不见 */}
                   <span style={{ width: `${Math.min(100, Math.round(candidate.prob * 100 * 6))}%` }} />
                 </span>
                 <span className="probability-value">{(candidate.prob * 100).toFixed(1)}%</span>

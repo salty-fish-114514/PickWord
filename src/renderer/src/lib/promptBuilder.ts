@@ -107,9 +107,10 @@ export const ANCHOR_BEFORE_CURSOR_NOTICE =
    ════════════════════════════════════════════════════════════════ */
 
 /** 四种模式的 system 段落文案，集中放这里方便你后续调词。 */
-const SYSTEM_OUTLINE = "根据给定大纲续写正文。直接输出正文，不要旁白、不要解释、不要确认语。";
-const SYSTEM_STYLE = "请模仿下列文本的写作风格进行创作。直接输出正文，不要旁白、不要解释、不要确认语。";
-const SYSTEM_FULL = "请模仿下列文本的写作风格，并根据给定大纲续写正文。直接输出正文，不要旁白、不要解释、不要确认语。";
+const SYSTEM_PLAIN = "请在用户给出“请开始写作。”指令后，完全自由发挥，进行段落级别写作。你可以从文字的中间，甚至结尾部分直接开始写作，随意预设前文中存在你需要的铺垫，伏笔。直接输出正文，不要旁白、不要解释、不要确认语。";
+const SYSTEM_OUTLINE = "在自行写出大纲后，根据大纲写作正文。在“大纲：\n”后写出大纲，并在“正文：\n”后，根据大纲直接输出正文，不要旁白、不要解释、不要确认语。";
+const SYSTEM_STYLE = "请模仿下列文本的写作风格进行创作。注意，你只需要参考给定文本的用词偏好，造句习惯等特征，绝对禁止将参考文本中的具体情节，人物设定等代入输出。在用户给出“请开始写作。”指令后，完全自由发挥，进行段落级别写作。你可以从文字的中间，甚至结尾部分直接开始写作，随意预设前文中存在你需要的铺垫，伏笔。在“正文：\n”后直接输出正文，不要旁白、不要解释、不要确认语。";
+const SYSTEM_FULL = "请模仿下列文本的写作风格，在自行写出大纲后，根据大纲写作正文。注意，你只需要参考给定文本的用词偏好，造句习惯等特征，绝对禁止将参考文本中的具体情节，人物设定等代入输出。在“大纲：\n”后写出大纲，并在“正文：\n”后，根据大纲直接输出正文，不要旁白、不要解释、不要确认语。";
 
 /** 把空白字符串归一为 undefined，方便后面用「有没有值」判断开关。 */
 function normalize(text: string | undefined): string | undefined {
@@ -129,7 +130,17 @@ function assemble(
   outline: string | undefined,
   body: string,
 ): { prompt: string; mode: PromptMode } {
-  if (!style && !outline) return { prompt: body, mode: "plain" };
+
+
+  if (!style && !outline) {
+    return {
+      mode: "plain",
+      prompt:
+        `<|im_start|>system\n${SYSTEM_PLAIN}<|im_end|>\n` +
+        `<|im_start|>user\n请开始写作。<|im_end|>\n` +
+        `<|im_start|>assistant\n正文：\n${body}`,
+    };
+  }
 
   if (outline && !style) {
     return {

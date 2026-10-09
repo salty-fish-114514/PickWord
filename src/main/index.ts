@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, net, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -10,7 +10,7 @@ import { getSetupState } from './setup'
 import { detectHardware } from './hardware'
 import fs from 'node:fs'
 import path from 'node:path'
-import { downloadFile, extractZip, broadcast } from './downloader'
+import { broadcast, downloadFile, extractZip, cleanupPartialDownload } from './downloader'
 import { getBackendConfigDir } from './setup'
 import type { BackendKind } from '../shared/ipc'
 
@@ -124,6 +124,61 @@ if (!app.requestSingleInstanceLock()) {
     let deployAbort: AbortController | null = null
 
     /** 依次尝试多个镜像源下载，全部失败才报错。 */
+    type SetupDownloadSourceState = {
+      preferredBase: string | null
+      officialProbe: 'unknown' | 'available' | 'unavailable'
+    }
+
+    // 每次部署都有独立状态：以这次部署的 AbortSignal 为键
+    const downloadSourceStates = new WeakMap<AbortSignal, SetupDownloadSourceState>()
+
+    const OFFICIAL_RELEASE_PREFIX =
+      'https://github.com/ggml-org/llama.cpp/releases/download/'
+    const OFFICIAL_PROBE_TIMEOUT_MS = 5_000
+
+    /** 5 秒内能读到第一个字节，才视为 GitHub 官方源可用 */
+    async function probeOfficialUrl(url: string, signal: AbortSignal): Promise<boolean> {
+      if (signal.aborted) throw new Error('用户取消了部署')
+
+      const probeController = new AbortController()
+      let response: Response | undefined
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+
+      const forwardAbort = (): void => probeController.abort()
+      signal.addEventListener('abort', forwardAbort, { once: true })
+      const timer = setTimeout(() => probeController.abort(), OFFICIAL_PROBE_TIMEOUT_MS)
+
+      try {
+        response = await net.fetch(url, {
+          method: 'GET',
+          headers: { Range: 'bytes=0-0' },
+          redirect: 'follow',
+          cache: 'no-store',
+          signal: probeController.signal
+        })
+        if (!response.ok || !response.body) return false
+
+        reader = response.body.getReader()
+        const { done, value } = await reader.read()
+        return !done && (value?.byteLength ?? 0) > 0
+      } catch {
+        if (signal.aborted) throw new Error('用户取消了部署')
+        return false
+      } finally {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', forwardAbort)
+        try {
+          if (reader) void reader.cancel().catch(() => {})
+          else if (response?.body) void response.body.cancel().catch(() => {})
+        } catch { /* ignore */ }
+      }
+    }
+
+    /**
+     * 先探测 GitHub 官方源，再依次尝试镜像。
+     * 每个源内部最多尝试 3 次；换源时从已下载的位置续传。
+     * 所有源都失败或用户取消时，删除临时文件。
+     */
     async function downloadWithMirrors(
       mirrors: string[],
       filename: string,
@@ -134,21 +189,97 @@ if (!app.requestSingleInstanceLock()) {
       fractionWeight: number
     ): Promise<void> {
       const errors: string[] = []
-      for (let i = 0; i < mirrors.length; i++) {
-        if (signal.aborted) throw new Error('用户取消了部署')
-        const url = mirrors[i] + filename
-        const suffix = i === mirrors.length - 1 ? '（直连）' : `（镜像 ${i + 1}/${mirrors.length}）`
-        try {
-          await downloadFile(url, destPath, `${uiLabel} ${suffix}`, signal, fractionBase, fractionWeight)
-          return // 成功就返回
-        } catch (err) {
-          if (signal.aborted) throw new Error('用户取消了部署')
-          const msg = err instanceof Error ? err.message : String(err)
-          errors.push(`${url} → ${msg}`)
-          // 继续尝试下一个镜像
-        }
+
+      let state = downloadSourceStates.get(signal)
+      if (!state) {
+        state = { preferredBase: null, officialProbe: 'unknown' }
+        downloadSourceStates.set(signal, state)
       }
-      throw new Error(`所有下载源均失败：\n${errors.join('\n')}`)
+
+      // 清理上次程序崩溃可能留下的临时文件，本次从头下载
+      await cleanupPartialDownload(destPath)
+
+      try {
+        const uniqueBases = [...new Set(mirrors)]
+        const officialBase = uniqueBases.find((b) => b.startsWith(OFFICIAL_RELEASE_PREFIX))
+        const proxyBases = uniqueBases.filter((b) => b !== officialBase)
+
+        if (officialBase && !state.preferredBase && state.officialProbe === 'unknown') {
+          broadcast('setup:progress', {
+            filename: `正在检测 GitHub 官方源：${filename}`,
+            receivedBytes: 0,
+            totalBytes: 0,
+            overallFraction: fractionBase
+          })
+          const reachable = await probeOfficialUrl(officialBase + filename, signal)
+          if (signal.aborted) throw new Error('用户取消了部署')
+          state.officialProbe = reachable ? 'available' : 'unavailable'
+          if (!reachable) {
+            errors.push(`${officialBase}${filename} → 官方源探测未通过，跳过直连`)
+            console.warn('[下载源切换] GitHub 官方源探测未通过，改用镜像')
+          }
+        }
+
+        const sources: Array<{ base: string; label: string; official: boolean }> = []
+        const added = new Set<string>()
+        const addSource = (base: string, label: string, official: boolean): void => {
+          if (added.has(base)) return
+          added.add(base)
+          sources.push({ base, label, official })
+        }
+
+        // CUDA 运行时优先复用主包下载成功的源
+        if (state.preferredBase) {
+          const isOfficial = state.preferredBase === officialBase
+          addSource(
+            state.preferredBase,
+            isOfficial ? '（GitHub 直连，复用）' : '（上次成功源，复用）',
+            isOfficial
+          )
+        }
+        if (officialBase && state.officialProbe === 'available') {
+          addSource(officialBase, '（GitHub 直连）', true)
+        }
+        for (let i = 0; i < proxyBases.length; i++) {
+          addSource(proxyBases[i], `（镜像 ${i + 1}/${proxyBases.length}）`, false)
+        }
+
+        for (const source of sources) {
+          if (signal.aborted) throw new Error('用户取消了部署')
+          const url = source.base + filename
+
+          try {
+            await downloadFile(
+              url,
+              destPath,
+              `${uiLabel} ${source.label}`,
+              signal,
+              fractionBase,
+              fractionWeight,
+              undefined,  // stallTimeoutMs：默认 15 秒
+              undefined,  // maxRetries：默认 3 次
+              undefined,  // connectTimeoutMs：默认 10 秒
+              true        // 失败时保留临时文件，交给下一个源续传
+            )
+            state.preferredBase = source.base
+            return
+          } catch (err) {
+            if (signal.aborted) throw new Error('用户取消了部署')
+            const msg = err instanceof Error ? err.message : String(err)
+            errors.push(`${url} → ${msg}`)
+            console.warn(`[下载源失败] ${source.label} ${msg}`)
+            if (source.official) state.officialProbe = 'unavailable'
+            if (state.preferredBase === source.base) state.preferredBase = null
+          }
+        }
+
+        throw new Error(`所有下载源均失败：\n${errors.join('\n')}`)
+      } catch (err) {
+        // 所有源都失败或用户取消：不留临时文件
+        await cleanupPartialDownload(destPath)
+        if (signal.aborted) throw new Error('用户取消了部署')
+        throw err
+      }
     }
 
     handle('setup:deploy', async (_win, rawConfig: unknown) => {
@@ -197,13 +328,23 @@ if (!app.requestSingleInstanceLock()) {
             cudartAsset = `cudart-llama-bin-win-cuda-${ver}-x64.zip`
           }
 
-          // 按优先级排列：清华 TUNA > ghproxy.net > gh-proxy.com > GitHub 直连
-          // 清华 TUNA 的 github-release 目录格式为 owner/project/tag/filename
+          const officialBase =
+            `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`
+
+          // 会先探测 officialBase；不通时再按下面的顺序尝试镜像
           const mirrors = [
-            `https://mirrors.tuna.tsinghua.edu.cn/github-release/ggml-org/llama.cpp/${LLAMA_TAG}/`,
-            `https://ghproxy.net/https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`,
-            `https://gh-proxy.com/https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`,
-            `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`,
+            `https://gh.llkk.cc/${officialBase}`,
+            `https://gh.idayer.com/${officialBase}`,
+            `https://ghfast.top/${officialBase}`,
+            `https://ghproxy.homeboyc.cn/${officialBase}`,
+            `https://ghproxy.net/${officialBase}`,
+            `https://gh-proxy.com/${officialBase}`,
+            `https://ghp.ci/${officialBase}`,
+            `https://github.akams.cn/${officialBase}`,
+            `https://moeyy.cn/gh-proxy/${officialBase}`,
+            `https://mirror.ghproxy.com/${officialBase}`,
+            `https://ghproxy.cxkpro.top/${officialBase}`,
+            officialBase,
           ]
 
           const exeDir = path.join(targetDir, 'llama-cpp')
@@ -254,8 +395,7 @@ if (!app.requestSingleInstanceLock()) {
 
         // ── 写入配置 ──
         // 不指定 --device，让 llama.cpp 自动检测 GPU
-        // -ngl 99 表示尽量全部卸载到 GPU，装不下的层自动留在 CPU
-        const args = ['-ngl', '99', '-c', '16384', '-t', String(threads), '-fa', 'on']
+        const args = ['-c', '16384', '-t', String(threads), '-fa', 'on', '--parallel', '1']
 
         const configDir = getBackendConfigDir()
         fs.mkdirSync(configDir, { recursive: true })
