@@ -387,3 +387,208 @@ class LlamaBackend {
 }
 
 export const backend = new LlamaBackend()
+
+/* ════════════════════════════════════════════════════════════════
+   设备列表：调用 llama-server --list-devices 获取实际可用设备
+   ════════════════════════════════════════════════════════════════ */
+
+/** llama.cpp 报告的一个可用设备。id 就是 --device 参数要填的值（如 ROCm0、CUDA0）。 */
+export interface BackendDeviceInfo {
+  id: string
+  name: string
+  /** 显存字节数；null 表示 llama-server 没报告。 */
+  vramBytes: number | null
+  /** 可用显存字节数；null 表示 llama-server 没报告。 */
+  freeVramBytes: number | null
+}
+
+/**
+ * 运行 llama-server --list-devices，解析输出得到实际可用设备列表。
+ * 
+ * 为什么不在硬件检测时猜测设备名：
+ *   llama.cpp 的设备名取决于编译时启用了哪些后端（Vulkan/CUDA/ROCm）。
+ *   HIP 编译版只认 ROCm0，CUDA 编译版只认 CUDA0，Vulkan 编译版只认 Vulkan0。
+ *   猜测前缀（Vulkan/CUDA/ROCm）容易出错——比如用户的 9070XT 配 HIP 后端时，
+ *   我们猜 Vulkan1 会直接报 "invalid device: Vulkan0"。
+ * 
+ * 正确做法：直接问 llama-server 它能看到哪些设备。
+ * 
+ * 输出格式示例：
+ *   ggml_cuda_init: found 1 ROCm devices (Total VRAM: 16368 MiB):
+ *     Device 0: AMD Radeon RX 7800 XT, ...VRAM: 16368 MiB
+ *   Available devices:
+ *     ROCm0: AMD Radeon RX 7800 XT (16368 MiB, 14000 MiB free)
+ */
+/**
+ * 从 backend.json 读取当前配置的 exe 路径，然后运行 llama-server --list-devices。
+ * 这样前端不需要知道 exe 的实际路径，避免路径推断错误。
+ */
+/** 是否为开发模式（用于控制调试日志输出） */
+const isDev = process.env.NODE_ENV !== 'production' && !process.env['ELECTRON_RENDERER_URL']
+
+export async function listBackendDevices(): Promise<BackendDeviceInfo[]> {
+  if (isDev) console.log('[listBackendDevices] 开始查询设备')
+  
+  // 从 backend.json 读取 exe 路径
+  const configPath = path.join(configDir(), 'backend.json')
+  let exePath: string
+  
+  try {
+    if (!fs.existsSync(configPath)) {
+      if (isDev) console.warn('[listBackendDevices] backend.json 不存在:', configPath)
+      return []
+    }
+    
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    exePath = config.exe
+    
+    // 如果是相对路径，转为绝对路径
+    if (!path.isAbsolute(exePath)) {
+      exePath = path.join(configDir(), exePath)
+    }
+    
+    // 检查 exe 是否存在
+    if (!fs.existsSync(exePath)) {
+      if (isDev) console.warn('[listBackendDevices] exe 不存在:', exePath)
+      return []
+    }
+  } catch (err) {
+    if (isDev) console.error('[listBackendDevices] 读取 backend.json 失败:', err)
+    return []
+  }
+  
+  if (isDev) console.log('[listBackendDevices] 使用 exe:', exePath)
+  
+  return new Promise((resolve) => {
+    // --list-devices 后 llama-server 会打印设备列表然后退出
+    // 设超时防止挂起（某些异常情况下进程不退出）
+    const timeout = setTimeout(() => {
+      if (isDev) console.warn('[listBackendDevices] 查询超时(10s)，强制终止进程')
+      child?.kill()
+      resolve([])
+    }, 10000)
+
+    let stdout = ''
+    const child = spawn(exePath, ['--list-devices'], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false
+    })
+
+    // 只收集 stdout，不收集 stderr
+    // stderr 包含 ggml_cuda_init、load_backend 等日志，不应该混入设备列表
+    child.stdout?.on('data', (chunk: Buffer) => { 
+      const text = chunk.toString('utf8')
+      stdout += text
+      if (isDev) console.log('[listBackendDevices] stdout:', text)
+    })
+
+    child.on('close', (code) => {
+      clearTimeout(timeout)
+      if (isDev) {
+        console.log('[listBackendDevices] 进程退出，code:', code)
+        console.log('[listBackendDevices] stdout 内容:', stdout)
+      }
+      const devices = parseDeviceList(stdout)
+      if (isDev) console.log('[listBackendDevices] 解析到设备数:', devices.length)
+      resolve(devices)
+    })
+    child.on('error', (err) => {
+      clearTimeout(timeout)
+      if (isDev) console.error('[listBackendDevices] 进程启动失败:', err)
+      resolve([])
+    })
+  })
+}
+
+/**
+ * 解析 --list-devices 的输出。
+ * 只保留有可用显存信息的设备（过滤掉 CPU、后端加载信息等非 GPU 行）
+ */
+function parseDeviceList(output: string): BackendDeviceInfo[] {
+  const devices: BackendDeviceInfo[] = []
+  const lines = output.split('\n')
+  let inAvailableSection = false
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+    
+    // 检测 "Available devices:" 标记
+    if (line.toLowerCase().includes('available devices')) {
+      inAvailableSection = true
+      continue
+    }
+    if (!inAvailableSection) continue
+    
+    // 跳过空行
+    if (!line) continue
+    
+    // 匹配设备行：设备ID + 冒号 + 设备名（必须包含显存信息）
+    // 例如："ROCm0: AMD Radeon RX 7800 XT (16368 MiB, 16222 MiB free)"
+    const colonIndex = line.indexOf(':')
+    if (colonIndex === -1) continue
+    
+    const id = line.substring(0, colonIndex).trim()
+    const rest = line.substring(colonIndex + 1).trim()
+    
+    // 跳过空 ID
+    if (!id) continue
+    
+    // 提取显存信息（必须包含 "总显存 MiB, 可用显存 MiB free" 格式）
+    // 只有真正有可用显存信息的设备才保留
+    const vramMatch = rest.match(/\((\d+)\s+MiB,\s*(\d+)\s+MiB\s+free\)/)
+    if (!vramMatch) {
+      // 没有可用显存信息的行不是有效的 GPU 设备，跳过
+      continue
+    }
+    
+    const totalMiB = parseInt(vramMatch[1])
+    const freeMiB = parseInt(vramMatch[2])
+    // 设备名是括号前的部分
+    const name = rest.substring(0, vramMatch.index).trim()
+    
+    if (isDev) console.log('[parseDeviceList] 匹配到设备:', { id, name, totalMiB, freeMiB })
+
+    devices.push({
+      id,
+      name,
+      vramBytes: totalMiB * 1024 * 1024,
+      freeVramBytes: freeMiB * 1024 * 1024
+    })
+  }
+
+  return devices
+}
+
+/**
+ * 更新 backend.json 中的 --device 参数。
+ * 用户通过 --list-devices 选择设备后调用此方法写入配置。
+ */
+export async function updateDeviceInConfig(deviceId: string): Promise<void> {
+  const configPath = path.join(configDir(), 'backend.json')
+  
+  // 读取现有配置
+  if (!fs.existsSync(configPath)) {
+    throw new Error('配置文件不存在')
+  }
+  
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+  const args: string[] = Array.isArray(raw.args) ? raw.args : []
+  
+  // 移除旧的 --device 参数
+  const deviceIdx = args.indexOf('--device')
+  if (deviceIdx !== -1 && deviceIdx + 1 < args.length) {
+    args.splice(deviceIdx, 2)
+  }
+  
+  // 添加新的 --device 参数
+  if (deviceId && deviceId !== 'none') {
+    args.push('--device', deviceId)
+  }
+  
+  raw.args = args
+  
+  // 写回配置
+  fs.writeFileSync(configPath, JSON.stringify(raw, null, 2), 'utf8')
+}
+

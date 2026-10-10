@@ -141,6 +141,8 @@ interface SettingsPanelProps {
   onChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onResetAdvanced: () => void;
   onClose: () => void;
+  /** 引导用户回到配置页重新设置模型和推理引擎 */
+  onReconfigureModel?: () => void;
 }
 
 /**
@@ -158,6 +160,7 @@ export function SettingsPanel({
   onChange,
   onResetAdvanced,
   onClose,
+  onReconfigureModel,
 }: SettingsPanelProps) {
   const [page, setPage] = useState<"basic" | "advanced">("basic");
 
@@ -286,6 +289,26 @@ export function SettingsPanel({
             checked={values.keepPopover}
             onToggle={() => onChange("keepPopover", !values.keepPopover)}
           />
+
+          {/* 模型配置区：放在高级设置上方，因为这是常用操作 */}
+          {onReconfigureModel && (
+            <div className="setting-block reconfigure-block">
+              <span className="setting-title">模型与推理引擎</span>
+              <p className="setting-hint">
+                更换模型文件、切换 GPU 后端（CUDA / ROCm / Vulkan）或调整推理参数。
+              </p>
+              <button
+                className="quiet-button quiet-button-accent"
+                type="button"
+                onClick={onReconfigureModel}
+              >
+                重新配置模型
+              </button>
+              <p className="setting-hint reconfigure-warning">
+                ⚠ 修改配置后模型会自动重新加载，写作中的候选功能会短暂中断。
+              </p>
+            </div>
+          )}
 
           <button className="advanced-entry" type="button" onClick={() => setPage("advanced")}>
             <span>高级设置</span>

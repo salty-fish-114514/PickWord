@@ -36,6 +36,8 @@ interface LibraryHomeProps {
   onResetDirectory: () => Promise<void>;
   onSettingsChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onResetAdvanced: () => void;
+  /** 引导用户回到配置页重新设置模型（从设置面板或警告条触发） */
+  onReconfigure?: () => void;
 }
 
 /** 显示最后一次交互的时间。排序使用完整时间戳，文字只是给作者阅读。 */
@@ -76,6 +78,7 @@ export function LibraryHome({
   onResetDirectory,
   onSettingsChange,
   onResetAdvanced,
+  onReconfigure,
 }: LibraryHomeProps) {
   const [query, setQuery] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -307,6 +310,26 @@ export function LibraryHome({
         />
       </div>
 
+      {/* 模型不可用时显示警告条：引导用户回到配置页完成设置 */}
+      {!backendIsDemo && (backendStatus === "stopped" || backendStatus === "error") && onReconfigure && (
+        <div className="library-model-warning" role="alert">
+          <div className="library-model-warning-content">
+            <Icon name="warning" size={18} />
+            <div>
+              <strong>本地模型尚未就绪</strong>
+              <span>
+                {backendStatus === "stopped"
+                  ? "模型服务未启动，候选词功能暂不可用。"
+                  : "模型启动失败，请检查配置或重新设置。"}
+              </span>
+            </div>
+          </div>
+          <button className="library-model-warning-action" type="button" onClick={onReconfigure}>
+            配置模型
+          </button>
+        </div>
+      )}
+
       <input
         ref={inputRef}
         type="file"
@@ -481,6 +504,7 @@ export function LibraryHome({
             onChange={onSettingsChange}
             onResetAdvanced={onResetAdvanced}
             onClose={() => setSettingsOpen(false)}
+            onReconfigureModel={onReconfigure}
           />
         )}
       </div>

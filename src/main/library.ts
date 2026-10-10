@@ -21,9 +21,15 @@ import type {
   LibraryEntry,
   LibraryFormat
 } from '../shared/ipc'
-import { writeFileAtomic } from './documents'
+import {
+  createSerializedQueue,
+  isObj,
+  parseAnchor,
+  safeFileName,
+  validateDocument,
+  writeFileAtomic,
+} from './ioUtils'
 
-const MAX_CONTENT_CHARS = 20_000_000
 const SIDECAR_VERSION = 2
 const CONFIG_FILE = (): string => path.join(app.getPath('userData'), 'library-config.json')
 
@@ -35,8 +41,6 @@ const defaultLibraryDir = (): string =>
 
 /* ───────── 小工具 ───────── */
 
-type Json = Record<string, unknown>
-const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
 const num = (v: unknown, fallback: number): number =>
   typeof v === 'number' && Number.isFinite(v) ? v : fallback
@@ -56,18 +60,6 @@ const sidecarPath = (dir: string, base: string): string => path.join(dir, `${bas
 
 const makeExcerpt = (content: string): string => content.replace(/\s+/g, ' ').trim().slice(0, 160)
 const countChars = (content: string): number => Array.from(content.replace(/\s/g, '')).length
-
-/** 标题 → 合法 Windows 文件名（不含扩展名）。 */
-function safeBaseName(title: string): string {
-  let name = title
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
-    .trim()
-    .replace(/[. ]+$/, '')
-    .slice(0, 80)
-  if (!name) name = '未命名文稿'
-  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(name)) name = `_${name}`
-  return name
-}
 
 /** 找一个不与现有文件冲突的文件名：标题 → 标题 (2) → …。 */
 async function uniqueBaseName(dir: string, base: string): Promise<string> {
@@ -113,13 +105,6 @@ interface Sidecar {
   outlineEnabled: boolean
   anchor: Anchor | null
   [key: string]: unknown // 保留未来版本的未知字段
-}
-
-function parseAnchor(v: unknown): Anchor | null {
-  if (!isObj(v)) return null
-  if (typeof v.offset !== 'number' || !Number.isInteger(v.offset) || v.offset < 0) return null
-  if (typeof v.fingerprint !== 'string') return null
-  return { offset: v.offset, fingerprint: v.fingerprint }
 }
 
 function parseFormat(v: unknown): LibraryFormat {
@@ -188,19 +173,10 @@ function toEntry(sc: Sidecar, content: string): LibraryEntry {
 
 /* ───────── 写入队列（与 documents.ts 的队列独立） ───────── */
 
-let libChain: Promise<unknown> = Promise.resolve()
-
-function libSerialized<T>(task: () => Promise<T>): Promise<T> {
-  const run = libChain.then(task, task)
-  libChain = run.catch(() => undefined)
-  return run
-}
+const libQueue = createSerializedQueue()
 
 export function whenLibWritesIdle(maxMs: number): Promise<void> {
-  return Promise.race([
-    libChain.then(() => undefined),
-    new Promise<void>((r) => setTimeout(r, maxMs))
-  ])
+  return libQueue.whenIdle(maxMs)
 }
 
 /* ───────── ID → 文件名 索引 ─────────
@@ -273,11 +249,11 @@ async function locate(dir: string, id: string): Promise<Located> {
 }
 
 /**
- * 让文件名跟上标题：若 safeBaseName(title) 与当前文件名不一致，成对重命名。
+ * 让文件名跟上标题：若 safeFileName(title) 与当前文件名不一致，成对重命名。
  * 返回最终文件名。目标名被占用时追加 (2)，绝不覆盖；只改大小写时直接 rename。
  */
 async function syncFileName(dir: string, base: string, title: string, id: string): Promise<string> {
-  const wanted = safeBaseName(title)
+  const wanted = safeFileName(title)
   if (wanted === base) return base
   const caseOnly = wanted.toLowerCase() === base.toLowerCase()
   const target = caseOnly ? wanted : await uniqueBaseName(dir, wanted)
@@ -309,27 +285,12 @@ function validateTitle(raw: unknown): string {
   return raw.trim().slice(0, 200)
 }
 
-function validateDocument(raw: unknown): DocumentPayload {
-  if (!isObj(raw)) throw new Error('文稿数据格式错误')
-  if (typeof raw.content !== 'string' || raw.content.length > MAX_CONTENT_CHARS) {
-    throw new Error('正文不是字符串或超出长度限制')
-  }
-  return {
-    title: str(raw.title),
-    content: raw.content,
-    styleText: str(raw.styleText),
-    outlineText: str(raw.outlineText),
-    styleEnabled: raw.styleEnabled === true,
-    outlineEnabled: raw.outlineEnabled === true,
-    anchor: parseAnchor(raw.anchor)
-  }
-}
 
 /* ───────── 对外接口 ───────── */
 
 export async function listLibrary(): Promise<LibraryEntry[]> {
   const dir = await readConfig()
-  return libSerialized(async () => (await scanLibrary(dir)).entries)
+  return libQueue.serialized(async () => (await scanLibrary(dir)).entries)
 }
 
 export async function readLibrary(rawId: unknown): Promise<DocumentPayload> {
@@ -352,11 +313,11 @@ export function createLibrary(rawDoc: unknown, rawFormat: unknown): Promise<Libr
   const doc = validateDocument(rawDoc)
   const format = parseFormat(rawFormat)
 
-  return libSerialized(async () => {
+  return libQueue.serialized(async () => {
     const dir = await readConfig()
     await fs.mkdir(dir, { recursive: true })
     const title = doc.title.trim() || '未命名文稿'
-    const base = await uniqueBaseName(dir, safeBaseName(title))
+    const base = await uniqueBaseName(dir, safeFileName(title))
     const now = Date.now()
     const sc: Sidecar = {
       ...freshSidecar(title, format, now),
@@ -378,7 +339,7 @@ export function saveLibrary(rawId: unknown, rawDoc: unknown): Promise<LibraryEnt
   const id = validateId(rawId)
   const doc = validateDocument(rawDoc)
 
-  return libSerialized(async () => {
+  return libQueue.serialized(async () => {
     const dir = await readConfig()
     const located = await locate(dir, id)
     const title = doc.title.trim() || located.sc.title || '未命名文稿'
@@ -406,7 +367,7 @@ export function renameLibrary(rawId: unknown, rawTitle: unknown): Promise<Librar
   const id = validateId(rawId)
   const title = validateTitle(rawTitle)
 
-  return libSerialized(async () => {
+  return libQueue.serialized(async () => {
     const dir = await readConfig()
     const located = await locate(dir, id)
     const base = await syncFileName(dir, located.base, title, id)
@@ -426,7 +387,7 @@ export function renameLibrary(rawId: unknown, rawTitle: unknown): Promise<Librar
 export function deleteLibrary(rawIds: unknown): Promise<void> {
   const ids = validateIds(rawIds)
 
-  return libSerialized(async () => {
+  return libQueue.serialized(async () => {
     const dir = await readConfig()
     const errors: string[] = []
     for (const id of ids) {
@@ -446,7 +407,7 @@ export function deleteLibrary(rawIds: unknown): Promise<void> {
 export function touchLibrary(rawId: unknown): Promise<LibraryEntry> {
   const id = validateId(rawId)
 
-  return libSerialized(async () => {
+  return libQueue.serialized(async () => {
     const dir = await readConfig()
     const { base, sc: old } = await locate(dir, id)
     const sc: Sidecar = { ...old, interactedAt: Math.max(old.interactedAt + 1, Date.now()) }
@@ -490,7 +451,7 @@ export async function resetLibraryDirectory(): Promise<LibraryDirectory> {
 
 /** 把 srcDir 的文稿全部复制到 dstDir；全部成功才切配置，再清理源目录。失败回滚。 */
 function migrateLibrary(srcDir: string, dstDir: string): Promise<void> {
-  return libSerialized(async () => {
+  return libQueue.serialized(async () => {
     await fs.mkdir(dstDir, { recursive: true })
     // 探测目标可写
     const probe = path.join(dstDir, `.zixia-probe-${Date.now()}`)

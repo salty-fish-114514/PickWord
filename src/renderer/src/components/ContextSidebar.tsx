@@ -2,15 +2,9 @@ import { type RefObject } from "react";
 
 import { Icon } from "./Icon";
 import { PROMPT_MODE_LABEL, type PromptMode } from "../lib/promptBuilder";
-import type { Anchor } from "../lib/types";
+import type { Anchor, ContextState } from "../lib/types";
 
-export interface ContextState {
-  styleEnabled: boolean;
-  styleText: string;
-  outlineEnabled: boolean;
-  outlineText: string;
-  anchor: Anchor | null;
-}
+export type { ContextState };
 
 interface ContextSidebarProps extends ContextState {
   /** 当前实际生效的拼接模式，用来给作者一个「我现在处于什么状态」的反馈。 */

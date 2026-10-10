@@ -1,3 +1,29 @@
+/* ═══════════════════════════════════════════════════════════════
+   目录（用 Ctrl+F "§ N" 秒级定位对应章节）
+═══════════════════════════════════════════════════════════════
+  § 1.  Reset & 全局变量             → L26
+  § 2.  通用控件 & 布局骨架          → L48
+  § 3.  顶栏 & 品牌                  → L113
+  § 4.  编辑器                       → L307
+  § 6.  侧栏通用框架                 → L485
+  § 6a. 查找面板                     → L556
+  § 7.  设置面板                     → L690
+  § 3b. 底部状态栏                   → L822
+  § 5.  候选浮层                     → L893
+  § 9a. 弹窗 & 日志对话框            → L1115
+  § 8.  写作上下文侧边栏             → L1209
+  § 9b. 文件提示条                   → L1566
+  § 9c. Toast 弱提醒                 → L1625
+  §10.  文库首页                     → L1711
+  §11a. 品牌标志                     → L2490
+  §11b. 后端状态条                   → L2495
+  §14.  大字号覆盖                   → L2586
+  §15.  响应式                       → L2720
+  §12.  首次设置向导                 → L3030
+═══════════════════════════════════════════════════════════════ */
+
+/* ═══════ § 1. Reset & 全局变量 ═══════ */
+
 * {
   box-sizing: border-box;
 }
@@ -18,6 +44,7 @@ body,
 #root {
   width: 100%;
   height: 100%;
+/* ═══════ § 2. 通用控件 & 布局骨架 ═══════ */
   min-width: 360px;
   min-height: 100%;
   margin: 0;
@@ -82,6 +109,7 @@ button {
 }
 
 .app-root[data-theme="dark"] {
+/* ═══════ § 3. 顶栏 & 品牌 ═══════ */
   color-scheme: dark;
   --app-bg: #252925;
   --paper: #2d322e;
@@ -275,6 +303,7 @@ button {
 
 .icon-button:disabled {
   cursor: default;
+/* ═══════ § 4. 编辑器 ═══════ */
   opacity: 0.38;
 }
 
@@ -452,6 +481,7 @@ button {
   outline: none;
   resize: none;
   background: transparent;
+/* ═══════ § 6. 侧栏通用框架 ═══════ */
   color: var(--ink-soft);
   caret-color: var(--accent-strong);
   font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", SimSun, serif;
@@ -522,6 +552,7 @@ button {
   font-size: 20px;
   font-weight: 500;
   letter-spacing: 0.035em;
+/* ═══════ § 6a. 查找面板 ═══════ */
 }
 
 .panel-close {
@@ -655,6 +686,7 @@ button {
 
 .result-index {
   padding-top: 1px;
+/* ═══════ § 7. 设置面板 ═══════ */
   color: var(--faint);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
@@ -747,6 +779,7 @@ button {
   cursor: pointer;
   font-size: 11px;
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+/* ── 开关控件 ── */
 }
 
 .theme-option:hover {
@@ -785,6 +818,7 @@ button {
   padding: 2px;
   border: 0;
   border-radius: 12px;
+/* ═══════ § 3b. 底部状态栏 ═══════ */
   background: var(--line-strong);
   cursor: pointer;
   transition: background-color 180ms ease;
@@ -855,6 +889,7 @@ button {
   white-space: nowrap;
 }
 
+/* ═══════ § 5. 候选浮层 ═══════ */
 .statusbar-right {
   justify-content: flex-end;
   gap: 17px;
@@ -1076,6 +1111,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 9px;
+/* ═══════ § 9a. 弹窗 & 日志对话框 ═══════ */
   min-height: 34px;
   padding: 0 12px;
   border-top: 1px solid var(--line);
@@ -1169,6 +1205,7 @@ kbd {
   0%, 100% { box-shadow: 0 0 0 0 rgba(199, 152, 85, 0.32); }
   50% { box-shadow: 0 0 0 4px rgba(199, 152, 85, 0); }
 }
+/* ═══════ § 8. 写作上下文侧边栏 ═══════ */
 
 @keyframes loadingLine {
   from { opacity: 0.35; transform: scaleX(0.6); }
@@ -1368,6 +1405,7 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── 设置面板：高级页 ── */
 .context-notices {
   margin: 11px 0 0;
   padding: 0;
@@ -1453,6 +1491,7 @@ kbd {
 }
 
 .settings-group-title {
+/* ── 上下文侧边栏补充 ── */
   margin: 4px 0 14px;
   color: var(--muted);
   font-size: 10px;
@@ -1491,6 +1530,7 @@ kbd {
 /* ── 上下文侧边栏补充 ── */
 .context-hint {
   margin: 8px 0 0;
+/* ── 图例：两种背景色的含义 ── */
   color: var(--faint);
   font-size: 10px;
   line-height: 1.65;
@@ -1522,6 +1562,7 @@ kbd {
 .app-root[data-theme="dark"] .anchor-notice {
   color: #d9b57c;
 }
+/* ═══════ § 9b. 文件提示条 ═══════ */
 
 .statusbar-hint.is-notice {
   color: var(--accent-strong);
@@ -1580,6 +1621,7 @@ kbd {
   background: rgba(197, 119, 106, 0.1);
   color: #b4675b;
 }
+/* ═══════ § 9c. Toast 弱提醒 ═══════ */
 
 .app-root[data-theme="dark"] .file-banner.is-error {
   color: #e2a094;
@@ -1665,6 +1707,7 @@ kbd {
   color: var(--ink);
 }
 
+/* ═══════ § 10. 文库首页 ═══════ */
 .toast-primary {
   border-color: var(--accent-border);
   background: var(--accent-wash);
@@ -2443,10 +2486,12 @@ kbd {
 .library-dialog-actions button.is-danger {
   border-color: #b76e63;
   background: #b76e63;
+/* ═══════ § 11a. 品牌标志 ═══════ */
   color: white;
 }
 
 .library-dialog-actions button:disabled {
+/* ═══════ § 11b. 后端状态条 ═══════ */
   cursor: default;
   opacity: 0.5;
 }
@@ -2537,6 +2582,7 @@ kbd {
 }
 
 .backend-progress-summary {
+/* ═══════ § 14. 大字号覆盖 ═══════ */
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -2577,6 +2623,180 @@ kbd {
 
 .library-backend-row .backend-progress {
   max-width: 720px;
+}
+
+/* ── 设备选择器（--list-devices 结果展示） ── */
+.setup-device-picker {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--bg-secondary, #f5f5f5);
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 8px;
+}
+
+[data-theme="dark"] .setup-device-picker {
+  --bg-secondary: #1a1a2e;
+  --border-color: #333;
+}
+
+.setup-device-picker h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.setup-device-hint {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #666);
+}
+
+.setup-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setup-device-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-primary, #fff);
+  border: 2px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+[data-theme="dark"] .setup-device-option {
+  --bg-primary: #16213e;
+}
+
+.setup-device-option:hover {
+  background: var(--bg-hover, #eee);
+}
+
+[data-theme="dark"] .setup-device-option:hover {
+  --bg-hover: #1a2744;
+}
+
+.setup-device-option.is-selected {
+  border-color: var(--accent-color, #4a9eff);
+  background: var(--bg-selected, #e8f4ff);
+}
+
+[data-theme="dark"] .setup-device-option.is-selected {
+  --bg-selected: #1a2744;
+}
+
+.setup-device-option input[type="radio"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.setup-device-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.setup-device-info strong {
+  font-size: 0.9rem;
+}
+
+.setup-device-name {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #666);
+}
+
+.setup-device-vram {
+  font-size: 0.8rem;
+  color: var(--accent-color, #4a9eff);
+  font-weight: 500;
+}
+
+.setup-device-empty {
+  color: var(--text-secondary, #666);
+  font-style: italic;
+}
+
+/* ── 模型不可用警告条 ── 放在顶栏下方，引导用户回到配置页 */
+.library-model-warning {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px clamp(24px, 4vw, 62px);
+  background: var(--warning-bg, #fef3cd);
+  border-bottom: 1px solid var(--warning-border, #f0c36d);
+  color: var(--warning-text, #664d03);
+}
+
+[data-theme="dark"] .library-model-warning {
+  --warning-bg: #332b00;
+  --warning-border: #665200;
+  --warning-text: #ffd966;
+}
+
+.library-model-warning-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.library-model-warning-content svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.library-model-warning-content strong {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 1px;
+}
+
+.library-model-warning-content span {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.library-model-warning-action {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: var(--warning-action-bg, #664d03);
+  color: var(--warning-action-text, #fff);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+.library-model-warning-action:hover {
+  opacity: 0.85;
+}
+
+[data-theme="dark"] .library-model-warning-action {
+  --warning-action-bg: #ffd966;
+  --warning-action-text: #332b00;
+}
+
+/* ── 重新配置模型区 ── 设置面板底部 */
+.reconfigure-block {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.reconfigure-warning {
+  margin-top: 6px;
+  color: var(--text-secondary, #888);
+  font-size: 0.82rem;
 }
 
 /* ===== 文字放大：界面文字整体放大约 1.6 倍，图标只放大约 1.15 倍 =====
@@ -2670,6 +2890,7 @@ kbd { font-size: calc(9px * var(--ui-scale)); min-width: calc(15px * 1.4); heigh
 .library-brand-symbol { width: 44px; height: 44px; }
 .library-brand-name { font-size: calc(20px * var(--ui-scale) * 0.85); }
 .library-brand-caption { font-size: calc(11px * var(--ui-scale)); }
+/* ═══════ § 15. 响应式 ═══════ */
 .library-brand-separator { height: 26px; }
 .library-search { height: calc(38px * 1.4); padding: 0 16px; gap: 12px; }
 .library-search input { font-size: calc(12px * var(--ui-scale)); }
@@ -2979,6 +3200,7 @@ kbd { font-size: calc(9px * var(--ui-scale)); min-width: calc(15px * 1.4); heigh
 
   .statusbar {
     flex-basis: 43px;
+/* ═══════ § 12. 首次设置向导 ═══════ */
     grid-template-columns: auto 1fr auto;
     gap: 9px;
     padding: 0 13px;

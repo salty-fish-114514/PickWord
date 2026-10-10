@@ -27,11 +27,8 @@ const PROMPT_MODES: readonly PromptMode[] = ['plain', 'outline', 'style', 'full'
 /* ───────── 处理「来路不明的 JSON」的小工具 ─────────
  * 从网络或 IPC 收到的数据在 TypeScript 里是 unknown（相当于「什么都可能」）。
  * 先用这些函数确认类型再使用，可以避免 any，也能防止格式变化时程序崩溃。 */
-type Json = Record<string, unknown>
-const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
-const asNum = (v: unknown): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? v : undefined
-const asStr = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+import type { Json } from './ioUtils'
+import { isObj, asNum, asStr } from './ioUtils'
 
 /* ───────── 模型信息与特殊 token（每次后端启动后查一次） ───────── */
 

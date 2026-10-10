@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type {
+  BackendDeviceInfo,
   BackendKind,
   DownloadProgress,
   HardwareReport,
@@ -12,6 +13,7 @@ interface SetupWizardProps {
   error?: string;
   checking: boolean;
   onRefresh: () => Promise<void>;
+  onSkip?: () => void;
 }
 
 const BACKEND_KIND_LABEL: Record<string, string> = {
@@ -58,7 +60,7 @@ function formatBytes(bytes: number | null): string {
   return `${bytes} B`;
 }
 
-export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
+export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProps) {
   /* ── 第 1 步：硬件检测 ── */
   const [hardware, setHardware] = useState<HardwareReport | null>(null);
   const [detecting, setDetecting] = useState(false);
@@ -82,6 +84,13 @@ export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
   const [deploying, setDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
+
+  /* ── 第 4 步：设备选择（部署后自动运行 --list-devices）── */
+  const [devices, setDevices] = useState<BackendDeviceInfo[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState("");
+  const [deviceQuerying, setDeviceQuerying] = useState(false);
+  /** 是否显示设备选择器 */
+  const [showDevicePicker, setShowDevicePicker] = useState(false);
 
   useEffect(() => {
     if (!window.api?.onDeployProgress) return;
@@ -130,6 +139,7 @@ export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
     setDeploying(true);
     setDeployError(null);
     setProgress(null);
+    setShowDevicePicker(false);
 
     try {
       await window.api.deployBackend({
@@ -142,13 +152,10 @@ export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
         threads,
       });
 
-      // ─── 关键改动：部署成功后，立即通知主进程启动后端 ───
-      if (window.api.retryBackend) {
-        await window.api.retryBackend();
-      }
-
-      // 然后再刷新界面进入编辑器
-      await onRefresh();
+      // ─── 部署成功后：查询可用设备 ───
+      // listBackendDevices 会自动从 backend.json 读取 exe 路径
+      await queryDevicesAndShow();
+      return; // 不直接进入编辑器，等设备选择
     } catch (caught) {
       const msg = caught instanceof Error ? caught.message : "部署中断";
       setDeployError(msg);
@@ -162,6 +169,85 @@ export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
     setDeployError("已取消部署。");
     setProgress(null);
   }
+
+  /** 查询 llama-server 的可用设备并显示选择器 */
+  async function queryDevicesAndShow() {
+    setDeviceQuerying(true);
+    setDeploying(false);
+    try {
+      const list = await window.api?.listBackendDevices?.() ?? [];
+      setDevices(list);
+      setShowDevicePicker(true);
+      // 默认选第一个 GPU 设备（排除 CPU）
+      const gpuDevices = list.filter((d) => !d.id.startsWith("CPU"));
+      if (gpuDevices.length > 0) {
+        setSelectedDevice(gpuDevices[0].id);
+      } else if (list.length > 0) {
+        setSelectedDevice(list[0].id);
+      }
+    } catch (err) {
+      setDeployError(`设备查询失败：${err instanceof Error ? err.message : String(err)}`);
+      // 查询失败不阻塞，直接进入
+      await finishSetup();
+    } finally {
+      setDeviceQuerying(false);
+    }
+  }
+
+  /** 确认设备选择 → 写入 backend.json → 启动后端 → 进入编辑器 */
+  async function confirmDeviceSelection() {
+    try {
+      if (window.api?.updateBackendDevice) {
+        await window.api.updateBackendDevice(selectedDevice || "none");
+      }
+      await finishSetup();
+    } catch (err) {
+      setDeployError(`保存设备配置失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** 跳过设备选择，直接进入 */
+  function skipDeviceSelection() {
+    setShowDevicePicker(false);
+    void finishSetup();
+  }
+
+  /** 启动后端并进入编辑器 */
+  async function finishSetup() {
+    // 通知主进程部署流程已完成，允许文件监控器正常工作
+    window.api?.deployFinished?.();
+    try {
+      if (window.api?.retryBackend) {
+        await window.api.retryBackend();
+      }
+    } catch {
+      // 启动失败不阻塞进入
+    }
+    await onRefresh();
+  }
+
+  /* ── 重新配置场景：加载已有配置时查询设备 ── */
+  useEffect(() => {
+    if (state?.configured && !showDevicePicker && !deploying) {
+      // 已配置状态进入，尝试查询设备
+      const tryLoad = async () => {
+        if (!window.api?.listBackendDevices) return;
+        try {
+          // listBackendDevices 会自动从 backend.json 读取 exe 路径
+          const list = await window.api.listBackendDevices();
+          if (list.length > 0) {
+            setDevices(list);
+            setShowDevicePicker(true);
+            const gpuDevices = list.filter((d) => !d.id.startsWith("CPU"));
+            setSelectedDevice(gpuDevices.length > 0 ? gpuDevices[0].id : list[0].id);
+          }
+        } catch {
+          // 查询失败不阻塞
+        }
+      };
+      void tryLoad();
+    }
+  }, [state?.configured]);
 
   const rec = hardware?.recommendation ?? null;
   const step2Enabled = hardware !== null;
@@ -241,6 +327,7 @@ export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
                         <small>
                           显存 {formatBytes(gpu.vramBytes)}
                           {gpu.vramBytes !== null ? `（来源: ${gpu.vramSource}）` : ""}
+                          {gpu.isIntegrated ? " · 集成显卡" : " · 独立显卡"}
                         </small>
                       </dd>
                     </div>
@@ -413,26 +500,119 @@ export function SetupWizard({ state, error, onRefresh }: SetupWizardProps) {
             </div>
           )}
 
+          {/* ═══ 第 4 步：设备选择 ═══ */}
+          {showDevicePicker && (
+            <div className="setup-device-picker">
+              <h3>选择推理设备</h3>
+              <p className="setup-device-hint">
+                以下是 llama-server 检测到的可用设备。请选择用于推理的 GPU。
+              </p>
+              {deviceQuerying ? (
+                <p>正在查询可用设备…</p>
+              ) : devices.length === 0 ? (
+                <p className="setup-device-empty">
+                  未检测到可用设备。将使用 llama.cpp 的默认设备配置。
+                  <br />
+                  <small>这可能是因为：1) llama-server 未正确安装；2) 驱动问题导致 GPU 不可用；3) 查询超时。请查看日志了解详细信息。</small>
+                </p>
+              ) : devices.length === 1 ? (
+                <>
+                  <p>只检测到一个设备，将自动使用它。</p>
+                  <div className="setup-device-list">
+                    {devices.map((device) => (
+                      <div key={device.id} className="setup-device-option is-selected">
+                        <div className="setup-device-info">
+                          <strong>{device.id}</strong>
+                          <span className="setup-device-name">{device.name}</span>
+                          {device.freeVramBytes !== null && (
+                            <span className="setup-device-vram">
+                              可用 {formatBytes(device.freeVramBytes)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="setup-device-list">
+                  {devices.map((device) => (
+                    <label key={device.id} className={`setup-device-option ${selectedDevice === device.id ? "is-selected" : ""}`}>
+                      <input
+                        type="radio"
+                        name="backendDevice"
+                        value={device.id}
+                        checked={selectedDevice === device.id}
+                        onChange={() => setSelectedDevice(device.id)}
+                      />
+                      <div className="setup-device-info">
+                        <strong>{device.id}</strong>
+                        <span className="setup-device-name">{device.name}</span>
+                        {device.freeVramBytes !== null && (
+                          <span className="setup-device-vram">
+                            可用 {formatBytes(device.freeVramBytes)}
+                          </span>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="setup-actions">
             {deploying ? (
               <button type="button" className="setup-cancel-button" onClick={cancelDeploy}>
                 取消部署
               </button>
+            ) : showDevicePicker ? (
+              <>
+                <button
+                  type="button"
+                  className="setup-primary-button"
+                  disabled={devices.length === 0 || deviceQuerying}
+                  onClick={() => void confirmDeviceSelection()}
+                >
+                  确认并启动
+                </button>
+                {devices.length > 0 && (
+                  <button
+                    type="button"
+                    className="setup-secondary-button"
+                    onClick={skipDeviceSelection}
+                  >
+                    使用默认设备
+                  </button>
+                )}
+              </>
             ) : (
-              <button
-                type="button"
-                className="setup-primary-button"
-                disabled={!step2Enabled}
-                onClick={() => void runDeploy()}
-              >
-                开始一键部署
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="setup-primary-button"
+                  disabled={!step2Enabled}
+                  onClick={() => void runDeploy()}
+                >
+                  开始一键部署
+                </button>
+                {onSkip && (
+                  <button
+                    type="button"
+                    className="setup-secondary-button"
+                    onClick={onSkip}
+                  >
+                    跳过配置
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>
 
         <p className="setup-footnote">
-          部署完成后将自动进入写作界面。配置保存在用户数据目录，卸载程序不会删除模型文件。
+          部署完成后将自动进入写作界面。也可以跳过配置直接进入（模型功能暂不可用）。
+          配置保存在用户数据目录，卸载程序不会删除模型文件。
         </p>
       </section>
     </main>

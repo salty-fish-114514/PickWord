@@ -186,6 +186,8 @@ export interface GpuInfo {
   vendor: GpuVendor;
   vramBytes: number | null;
   vramSource: VramSource;
+  /** 是否为集成显卡(iGPU)。帮助 llama.cpp 选择正确的主 GPU。 */
+  isIntegrated?: boolean;
 }
 
 export interface CpuInfo {
@@ -219,6 +221,12 @@ export interface WriterApi {
   getSetupState?: () => Promise<SetupState>;
   /** 首次设置:检测 CPU / 内存 / 显卡并给出后端推荐。 */
   detectHardware?: () => Promise<HardwareReport>;
+  /** 查询已安装的 llama-server 实际识别到的设备列表（用于 --device 选择） */
+  listBackendDevices?: () => Promise<BackendDeviceInfo[]>;
+  /** 更新 backend.json 中的 --device 参数（用户选择设备后调用） */
+  updateBackendDevice?: (deviceId: string) => Promise<void>;
+  /** 通知主进程部署流程已完成 */
+  deployFinished?: () => void;
 
   /** 开始部署后端与模型（下载、解压、写配置） */
   deployBackend?: (config: {
@@ -298,6 +306,17 @@ declare global {
   }
 }
 
+/**
+ * llama.cpp 报告的一个可用设备。
+ * 通过 llama-server --list-devices 获取，id 就是 --device 参数要填的值。
+ */
+export interface BackendDeviceInfo {
+  id: string;
+  name: string;
+  vramBytes: number | null;
+  freeVramBytes: number | null;
+}
+
 export interface DownloadProgress {
   filename: string;
   receivedBytes: number;
@@ -310,4 +329,13 @@ export interface ModelPreset {
   name: string;
   sizeLabel: string;
   url: string;
+}
+
+/** 写作上下文状态：风格参考、大纲、锚点 */
+export interface ContextState {
+  styleEnabled: boolean;
+  styleText: string;
+  outlineEnabled: boolean;
+  outlineText: string;
+  anchor: Anchor | null;
 }

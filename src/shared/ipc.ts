@@ -112,6 +112,8 @@ export interface GpuInfo {
   /** 显存字节数;null = 没有任何可靠来源,界面显示"未知",不要编造。 */
   vramBytes: number | null
   vramSource: VramSource
+  /** 是否为集成显卡(iGPU)。帮助 llama.cpp 选择正确的主 GPU。 */
+  isIntegrated?: boolean
 }
 
 export interface CpuInfo {
@@ -152,6 +154,18 @@ export interface HardwareReport {
 }
 
 // ─── 部署与下载 ───────────────────────────────────────────────
+
+/**
+ * llama.cpp 报告的一个可用设备。
+ * 通过 llama-server --list-devices 获取，id 就是 --device 参数要填的值。
+ * 例如：ROCm0、CUDA0、Vulkan0 等。
+ */
+export interface BackendDeviceInfo {
+  id: string
+  name: string
+  vramBytes: number | null
+  freeVramBytes: number | null
+}
 
 export interface DownloadProgress {
   /** 正在处理的阶段或文件名 */

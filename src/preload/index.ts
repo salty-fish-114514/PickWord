@@ -17,6 +17,7 @@ import type {
   SaveResult,
   HardwareReport,
   SetupState,
+  BackendDeviceInfo,
   UiBackendStatus,
   DownloadProgress 
 } from '../shared/ipc'
@@ -38,6 +39,16 @@ const api = {
   getSetupState: (): Promise<SetupState> => ipcRenderer.invoke('setup:get-state'),
   // 硬件检测(首次设置向导用,可能需要几秒)
   detectHardware: (): Promise<HardwareReport> => ipcRenderer.invoke('setup:detect-hardware'),
+  // 查询已安装的 llama-server 实际识别到的设备列表（用于 --device 选择）
+  // 自动从 backend.json 读取 exe 路径
+  listBackendDevices: (): Promise<BackendDeviceInfo[]> =>
+    ipcRenderer.invoke('setup:list-devices'),
+  // 更新 backend.json 中的 --device 参数
+  updateBackendDevice: (deviceId: string): Promise<void> =>
+    ipcRenderer.invoke('setup:update-device', deviceId),
+  // 通知主进程部署流程已完成（包括跳过设备选择的情况）
+  deployFinished: (): void =>
+    ipcRenderer.send('setup:deploy-finished'),
 
   deployBackend: (config: {
     targetDir: string

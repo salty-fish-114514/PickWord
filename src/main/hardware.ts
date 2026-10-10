@@ -412,7 +412,11 @@ async function detectGpus(
       }
     }
 
-    gpus.push({ name, vendor, vramBytes, vramSource })
+    // 标记集成显卡：Intel 核显、AMD APU 内置显卡
+    const isIntegrated = vendor === 'intel' || 
+      /\b(integrated|graphics|igpu|apu)\b/i.test(name) ||
+      (vendor === 'amd' && /Radeon\s*(Graphics|Radeon|680M|660M|780M|890M)/i.test(name) && vramBytes !== null && vramBytes < 512 * 1024 * 1024)
+    gpus.push({ name, vendor, vramBytes, vramSource, isIntegrated })
   }
 
   return { gpus, nvidiaDriverVersion }
@@ -476,7 +480,7 @@ function recommend(
   cpu: CpuInfo,
   gpus: GpuInfo[],
   nvidiaDriver: string | null,
-  warnings: string[]
+  warnings: string[],
 ): BackendRecommendation {
   const { threads, note } = recommendThreads(cpu)
   const base = { recommendedThreads: threads, threadsNote: note }
@@ -555,8 +559,26 @@ function recommend(
 
 export async function detectHardware(): Promise<HardwareReport> {
   const warnings: string[] = []
-  const [cpu, gpuResult] = await Promise.all([detectCpu(warnings), detectGpus(warnings)])
+  const [cpu, gpuResult] = await Promise.all([
+    detectCpu(warnings),
+    detectGpus(warnings)
+  ])
   const { gpus, nvidiaDriverVersion } = gpuResult
+
+  // 按显存从大到小排序 GPU（方便 UI 显示，独显优先）
+  gpus.sort((a, b) => {
+    const aDisc = !a.isIntegrated ? 1 : 0
+    const bDisc = !b.isIntegrated ? 1 : 0
+    if (aDisc !== bDisc) return bDisc - aDisc  // 独显排在前面
+    const aVram = a.vramBytes ?? 0
+    const bVram = b.vramBytes ?? 0
+    return bVram - aVram
+  })
+
+  // 不再自动猜测 --device 值：
+  // llama.cpp 的设备名（ROCm0 / CUDA0 / Vulkan0）取决于编译时启用了哪些后端，
+  // 无法从操作系统信息推断。正确做法是部署后用 --list-devices 让 llama-server 自己报告。
+  // 这里只标记 isIntegrated 供 UI 显示参考。
 
   return {
     cpu,
