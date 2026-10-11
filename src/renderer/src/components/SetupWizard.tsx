@@ -3,17 +3,22 @@ import type {
   BackendDeviceInfo,
   BackendKind,
   DownloadProgress,
+  ExistingBackendConfig,
   HardwareReport,
   ModelPreset,
   SetupState,
 } from "../lib/types";
+import { pickNativeDirectory, pickNativeFile } from "../lib/pathPicker";
+import { Icon } from "./Icon";
 
 interface SetupWizardProps {
   state: SetupState | null;
   error?: string;
-  checking: boolean;
+  checking?: boolean;
   onRefresh: () => Promise<void>;
   onSkip?: () => void;
+  /** 现有的后端配置（用于旧版本升级后直接进入设备选择） */
+  existingConfig?: ExistingBackendConfig;
 }
 
 const BACKEND_KIND_LABEL: Record<string, string> = {
@@ -52,6 +57,7 @@ const MODEL_PRESETS: ModelPreset[] = [
 
 type EngineSource = "auto" | "local";
 type ModelSource = "preset" | "local";
+type WizardStep = 1 | 2 | 3 | 4;
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return "未知";
@@ -60,7 +66,10 @@ function formatBytes(bytes: number | null): string {
   return `${bytes} B`;
 }
 
-export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProps) {
+export function SetupWizard({ state, error, onRefresh, onSkip, existingConfig }: SetupWizardProps) {
+  /* ── 步骤导航 ── */
+  const [currentStep, setCurrentStep] = useState<WizardStep>(existingConfig ? 4 : 1);
+
   /* ── 第 1 步：硬件检测 ── */
   const [hardware, setHardware] = useState<HardwareReport | null>(null);
   const [detecting, setDetecting] = useState(false);
@@ -89,7 +98,6 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
   const [devices, setDevices] = useState<BackendDeviceInfo[]>([]);
   const [selectedDevice, setSelectedDevice] = useState("");
   const [deviceQuerying, setDeviceQuerying] = useState(false);
-  /** 是否显示设备选择器 */
   const [showDevicePicker, setShowDevicePicker] = useState(false);
 
   useEffect(() => {
@@ -98,7 +106,40 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
     return typeof unsub === "function" ? unsub : undefined;
   }, []);
 
-  /* ── 检测 ── */
+  /* ── 从现有配置预填表单字段（重新配置/旧版本升级场景）──
+   * 当 state.existingConfig 存在时，将已有的 exe/model 路径预填到表单中，
+   * 并从 args 数组中提取 context size 和 threads 等参数。
+   * 这样用户不必从零手填，只需调整需要变更的部分。
+   */
+  useEffect(() => {
+    const ec = state?.existingConfig;
+    if (!ec || existingConfig) return; // existingConfig prop 走简化 UI，不需要预填
+
+    // 预填引擎路径（使用本地 exe 模式）
+    if (ec.exe) {
+      setEngineSource("local");
+      setLocalExePath(ec.exe);
+    }
+
+    // 预填模型路径（使用本地模型模式）
+    if (ec.model) {
+      setModelSource("local");
+      setLocalModelPath(ec.model);
+    }
+
+    // 从 args 中提取已知参数值
+    if (Array.isArray(ec.args) && ec.args.length > 0) {
+      const args = ec.args;
+      // 查找 -t（线程数）
+      const tIdx = args.indexOf("-t");
+      if (tIdx >= 0 && tIdx + 1 < args.length) {
+        const val = parseInt(args[tIdx + 1], 10);
+        if (!isNaN(val) && val > 0) setThreads(val);
+      }
+    }
+  }, [state?.existingConfig, existingConfig]);
+
+  /* ── 硬件检测 ── */
   async function runDetection() {
     if (!window.api?.detectHardware) {
       setDetectError("当前环境不支持硬件检测。");
@@ -124,19 +165,20 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
     if (!window.api?.deployBackend) return;
 
     if (engineSource === "local" && !localExePath.trim()) {
-      setDeployError("请输入 llama-server.exe 的完整路径。");
+      setDeployError("请输入或选择 llama-server.exe 的完整路径。");
       return;
     }
     if (modelSource === "local" && !localModelPath.trim()) {
-      setDeployError("请输入 .gguf 模型文件的完整路径。");
+      setDeployError("请输入或选择 .gguf 模型文件的完整路径。");
       return;
     }
     if (engineSource === "auto" && !targetDir.trim()) {
-      setDeployError("请输入文件存放目录。");
+      setDeployError("请输入或选择文件存放目录。");
       return;
     }
 
     setDeploying(true);
+    setCurrentStep(3);
     setDeployError(null);
     setProgress(null);
     setShowDevicePicker(false);
@@ -152,10 +194,8 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
         threads,
       });
 
-      // ─── 部署成功后：查询可用设备 ───
-      // listBackendDevices 会自动从 backend.json 读取 exe 路径
+      // 部署成功后：查询可用设备并进入步骤 4
       await queryDevicesAndShow();
-      return; // 不直接进入编辑器，等设备选择
     } catch (caught) {
       const msg = caught instanceof Error ? caught.message : "部署中断";
       setDeployError(msg);
@@ -174,11 +214,11 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
   async function queryDevicesAndShow() {
     setDeviceQuerying(true);
     setDeploying(false);
+    setCurrentStep(4);
     try {
-      const list = await window.api?.listBackendDevices?.() ?? [];
+      const list = (await window.api?.listBackendDevices?.()) ?? [];
       setDevices(list);
       setShowDevicePicker(true);
-      // 默认选第一个 GPU 设备（排除 CPU）
       const gpuDevices = list.filter((d) => !d.id.startsWith("CPU"));
       if (gpuDevices.length > 0) {
         setSelectedDevice(gpuDevices[0].id);
@@ -187,7 +227,6 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
       }
     } catch (err) {
       setDeployError(`设备查询失败：${err instanceof Error ? err.message : String(err)}`);
-      // 查询失败不阻塞，直接进入
       await finishSetup();
     } finally {
       setDeviceQuerying(false);
@@ -206,15 +245,12 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
     }
   }
 
-  /** 跳过设备选择，直接进入 */
   function skipDeviceSelection() {
     setShowDevicePicker(false);
     void finishSetup();
   }
 
-  /** 启动后端并进入编辑器 */
   async function finishSetup() {
-    // 通知主进程部署流程已完成，允许文件监控器正常工作
     window.api?.deployFinished?.();
     try {
       if (window.api?.retryBackend) {
@@ -229,16 +265,15 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
   /* ── 重新配置场景：加载已有配置时查询设备 ── */
   useEffect(() => {
     if (state?.configured && !showDevicePicker && !deploying) {
-      // 已配置状态进入，尝试查询设备
       const tryLoad = async () => {
         if (!window.api?.listBackendDevices) return;
         try {
-          // listBackendDevices 会自动从 backend.json 读取 exe 路径
           const list = await window.api.listBackendDevices();
           if (list.length > 0) {
             setDevices(list);
             setShowDevicePicker(true);
-            const gpuDevices = list.filter((d) => !d.id.startsWith("CPU"));
+            setCurrentStep(4);
+            const gpuDevices = list.filter((oe) => !oe.id.startsWith("CPU"));
             setSelectedDevice(gpuDevices.length > 0 ? gpuDevices[0].id : list[0].id);
           }
         } catch {
@@ -252,230 +287,55 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
   const rec = hardware?.recommendation ?? null;
   const step2Enabled = hardware !== null;
 
-  return (
-    <main className="setup-root">
-      <section className="setup-card" aria-labelledby="setup-title">
-        <div className="setup-brand">PickWord</div>
-        <h1 id="setup-title">准备本地写作模型</h1>
+  /* ── 原生路径交互选择函数 ── */
+  async function chooseTargetDirectory() {
+    const dir = await pickNativeDirectory(targetDir);
+    if (dir) setTargetDir(dir);
+  }
 
-        <p className="setup-description">
-          PickWord 主程序已经安装。下面先检测此电脑的硬件，然后根据结果下载合适的模型运行环境。
-        </p>
+  async function chooseLocalExeFile() {
+    const file = await pickNativeFile({
+      accept: ".exe",
+      description: "llama-server 可执行程序 (*.exe)",
+      defaultPath: localExePath || "D:\\llama-server.exe",
+    });
+    if (file) setLocalExePath(file);
+  }
 
-        {error && (
-          <div className="setup-status is-error">
-            <strong>环境异常</strong>
-            <span>{error}</span>
-          </div>
-        )}
-        {state && !state.configured && !error && (
-          <div className="setup-status">
-            <strong>需要配置</strong>
-            <span>{state.message}</span>
-          </div>
-        )}
+  async function chooseLocalModelFile() {
+    const file = await pickNativeFile({
+      accept: ".gguf",
+      description: "GGUF 模型权重文件 (*.gguf)",
+      defaultPath: localModelPath || "D:\\model.gguf",
+    });
+    if (file) setLocalModelPath(file);
+  }
 
-        {/* ═══ 第 1 步 ═══ */}
-        <div className="setup-section">
-          <div className="setup-section-head">
-            <h2>第 1 步：硬件检测</h2>
-            <button
-              className="setup-secondary-button"
-              disabled={detecting || deploying}
-              onClick={() => void runDetection()}
-            >
-              {detecting ? "正在检测…" : hardware ? "重新检测" : "开始检测"}
-            </button>
-          </div>
-
-          {detectError && (
-            <div className="setup-status is-error" style={{ marginTop: 12 }}>
-              <span>{detectError}</span>
-            </div>
-          )}
-
-          {hardware && (
-            <>
-              <dl className="setup-facts">
-                <div>
-                  <dt>处理器</dt>
-                  <dd>
-                    {hardware.cpu.name}
-                    <small>
-                      {hardware.cpu.physicalCores !== null
-                        ? `${hardware.cpu.physicalCores} 核 ${hardware.cpu.logicalCores} 线程`
-                        : `物理核心未知 · ${hardware.cpu.logicalCores} 逻辑处理器`}
-                      {hardware.cpu.isKnownMultiCcd ? " · 多 CCD" : ""}
-                    </small>
-                  </dd>
-                </div>
-                <div>
-                  <dt>内存</dt>
-                  <dd>{formatBytes(hardware.ramBytes)}</dd>
-                </div>
-                {hardware.gpus.length === 0 ? (
-                  <div>
-                    <dt>显卡</dt>
-                    <dd>未检测到</dd>
-                  </div>
-                ) : (
-                  hardware.gpus.map((gpu, i) => (
-                    <div key={`${gpu.name}-${i}`}>
-                      <dt>显卡</dt>
-                      <dd>
-                        {gpu.name}
-                        <small>
-                          显存 {formatBytes(gpu.vramBytes)}
-                          {gpu.vramBytes !== null ? `（来源: ${gpu.vramSource}）` : ""}
-                          {gpu.isIntegrated ? " · 集成显卡" : " · 独立显卡"}
-                        </small>
-                      </dd>
-                    </div>
-                  ))
-                )}
-                {hardware.nvidiaDriverVersion && (
-                  <div>
-                    <dt>NVIDIA 驱动</dt>
-                    <dd>{hardware.nvidiaDriverVersion}</dd>
-                  </div>
-                )}
-              </dl>
-
-              {rec && (
-                <div className="setup-recommend">
-                  <strong>
-                    推荐引擎：{BACKEND_KIND_LABEL[rec.kind]}
-                    {rec.cudaVersion ? `（CUDA ${rec.cudaVersion}）` : ""}
-                  </strong>
-                  <span>{rec.reason}</span>
-                  <span>建议线程数：{rec.recommendedThreads ?? "请手动设置"}。{rec.threadsNote}</span>
-                </div>
-              )}
-
-              {hardware.warnings.length > 0 && (
-                <ul className="setup-warnings">
-                  {hardware.warnings.map((w, i) => (
-                    <li key={i}>{w}</li>
-                  ))}
-                </ul>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* ═══ 第 2 步 ═══ */}
-        <div className={`setup-section ${!step2Enabled ? "is-dimmed" : ""}`}>
-          <h2>第 2 步：引擎与模型</h2>
-
-          {/* 运行引擎 */}
-          <div className="setup-form-row">
-            <label>运行引擎</label>
-            <select disabled={deploying} value={backendKind} onChange={(e) => setBackendKind(e.target.value as BackendKind)}>
-              <option value="cuda">NVIDIA CUDA（最快）</option>
-              <option value="rocm">AMD HIP/ROCm（部分型号较快）</option>
-              <option value="vulkan">Vulkan（通用 GPU）</option>
-              <option value="cpu">纯 CPU</option>
-            </select>
-          </div>
-
-          {backendKind === "cuda" && (
-            <div className="setup-form-row">
-              <label>CUDA 版本</label>
-              <select disabled={deploying} value={cudaVersion} onChange={(e) => setCudaVersion(e.target.value as "12.4" | "13.x")}>
-                <option value="12.4">CUDA 12.4（兼容 GTX 9xx ~ RTX 40 系）</option>
-                <option value="13.x">CUDA 13.x（RTX 50 系必选）</option>
-              </select>
-            </div>
-          )}
-
-          <div className="setup-form-row">
-            <label>CPU 线程数</label>
-            <input type="number" disabled={deploying} min={1} max={128} value={threads} onChange={(e) => setThreads(Number(e.target.value))} />
-            {rec && <p className="setup-hint">{rec.threadsNote}</p>}
-          </div>
-
-          {/* 引擎来源 */}
-          <div className="setup-form-row">
-            <label>
-              <input type="radio" name="engineSource" disabled={deploying} checked={engineSource === "auto"} onChange={() => setEngineSource("auto")} />
-              {" "}自动下载推荐版本的 llama.cpp
-            </label>
-          </div>
-          <div className="setup-form-row">
-            <label>
-              <input type="radio" name="engineSource" disabled={deploying} checked={engineSource === "local"} onChange={() => setEngineSource("local")} />
-              {" "}使用本地已有的 llama-server（高级）
-            </label>
-            {engineSource === "local" && (
-              <div className="radio-content">
-                <input
-                  type="text"
-                  disabled={deploying}
-                  value={localExePath}
-                  onChange={(e) => setLocalExePath(e.target.value)}
-                  placeholder="例如 D:\llama-b8868-bin-win-hip-radeon-x64\llama-server.exe"
-                />
-                <p className="setup-hint">请粘贴 llama-server.exe 的完整路径。此选项不会下载引擎。</p>
-              </div>
+  /* ── 旧版本升级场景：直接显示设备选择界面 ── */
+  if (existingConfig) {
+    return (
+      <main className="setup-root">
+        <section className="setup-card" aria-labelledby="setup-title">
+          <div className="setup-header-row">
+            <div className="setup-brand">PickWord</div>
+            {onSkip && (
+              <button type="button" className="setup-skip-link" onClick={onSkip}>
+                跳过配置，先体验写作 →
+              </button>
             )}
           </div>
 
-          {/* 文件存放 */}
-          {(engineSource === "auto" || modelSource === "preset") && (
-            <div className="setup-form-row">
-              <label>文件存放目录（引擎和模型可达数十 GB，建议放非系统盘）</label>
-              <input
-                type="text"
-                disabled={deploying}
-                value={targetDir}
-                onChange={(e) => setTargetDir(e.target.value)}
-                placeholder="例如 D:\PickWordData"
-              />
+          <h1 id="setup-title">选择推理设备</h1>
+          <p className="setup-description">
+            检测到您之前已经配置过模型，现在只需要选择推理设备即可。
+          </p>
+
+          {state && !state.configured && (
+            <div className="setup-status">
+              <strong>配置状态</strong>
+              <span>{state.message}</span>
             </div>
           )}
-
-          {/* 模型来源 */}
-          <div className="setup-form-row">
-            <label>
-              <input type="radio" name="modelSource" disabled={deploying} checked={modelSource === "preset"} onChange={() => setModelSource("preset")} />
-              {" "}下载预设模型（推荐）
-            </label>
-            {modelSource === "preset" && (
-              <div className="radio-content">
-                {MODEL_PRESETS.map((m) => (
-                  <label key={m.id} className="model-radio">
-                    <input type="radio" disabled={deploying} checked={selectedPresetUrl === m.url} onChange={() => setSelectedPresetUrl(m.url)} />
-                    <div>
-                      <strong>{m.name}</strong>
-                      <span>{m.sizeLabel}</span>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="setup-form-row">
-            <label>
-              <input type="radio" name="modelSource" disabled={deploying} checked={modelSource === "local"} onChange={() => setModelSource("local")} />
-              {" "}使用本地已有的模型文件（高级）
-            </label>
-            {modelSource === "local" && (
-              <div className="radio-content">
-                <input
-                  type="text"
-                  disabled={deploying}
-                  value={localModelPath}
-                  onChange={(e) => setLocalModelPath(e.target.value)}
-                  placeholder="粘贴 .gguf 文件的完整路径"
-                />
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ═══ 第 3 步 ═══ */}
-        <div className="setup-section">
-          <h2>第 3 步：开始部署</h2>
 
           {deployError && (
             <div className="setup-status is-error" style={{ marginTop: 12 }}>
@@ -483,41 +343,27 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
             </div>
           )}
 
-          {deploying && progress && (
-            <div className="progress-box" style={{ marginTop: 12 }}>
-              <span>{progress.filename}</span>
-              <div className="progress-stats">
-                {progress.totalBytes > 0 && (
-                  <span>{formatBytes(progress.receivedBytes)} / {formatBytes(progress.totalBytes)}</span>
-                )}
-                {progress.overallFraction !== undefined && (
-                  <span>{Math.round(progress.overallFraction * 100)}%</span>
-                )}
-              </div>
-              <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${(progress.overallFraction ?? 0) * 100}%` }} />
+          {/* 设备选择 */}
+          <div className="setup-section">
+            <div className="setup-section-head">
+              <div>
+                <h2>选择推理设备</h2>
+                <p className="setup-section-subtitle">确认用于 llama.cpp 运算的加速显卡并启动本地服务。</p>
               </div>
             </div>
-          )}
 
-          {/* ═══ 第 4 步：设备选择 ═══ */}
-          {showDevicePicker && (
-            <div className="setup-device-picker">
-              <h3>选择推理设备</h3>
-              <p className="setup-device-hint">
-                以下是 llama-server 检测到的可用设备。请选择用于推理的 GPU。
-              </p>
+            <div className="setup-device-picker" style={{ marginTop: 16 }}>
               {deviceQuerying ? (
-                <p>正在查询可用设备…</p>
+                <p>正在查询可用计算设备…</p>
               ) : devices.length === 0 ? (
                 <p className="setup-device-empty">
-                  未检测到可用设备。将使用 llama.cpp 的默认设备配置。
+                  未检测到专属 GPU 设备。将使用默认设备配置启动服务。
                   <br />
-                  <small>这可能是因为：1) llama-server 未正确安装；2) 驱动问题导致 GPU 不可用；3) 查询超时。请查看日志了解详细信息。</small>
+                  <small>可在启动后随时在设置面板中重新切换设备或调整后端参数。</small>
                 </p>
               ) : devices.length === 1 ? (
                 <>
-                  <p>只检测到一个设备，将自动使用它。</p>
+                  <p>已识别到可用设备：</p>
                   <div className="setup-device-list">
                     {devices.map((device) => (
                       <div key={device.id} className="setup-device-option is-selected">
@@ -526,7 +372,7 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
                           <span className="setup-device-name">{device.name}</span>
                           {device.freeVramBytes !== null && (
                             <span className="setup-device-vram">
-                              可用 {formatBytes(device.freeVramBytes)}
+                              可用显存 {formatBytes(device.freeVramBytes)}
                             </span>
                           )}
                         </div>
@@ -550,7 +396,7 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
                         <span className="setup-device-name">{device.name}</span>
                         {device.freeVramBytes !== null && (
                           <span className="setup-device-vram">
-                            可用 {formatBytes(device.freeVramBytes)}
+                            可用显存 {formatBytes(device.freeVramBytes)}
                           </span>
                         )}
                       </div>
@@ -559,56 +405,554 @@ export function SetupWizard({ state, error, onRefresh, onSkip }: SetupWizardProp
                 </div>
               )}
             </div>
-          )}
+          </div>
 
           <div className="setup-actions">
-            {deploying ? (
-              <button type="button" className="setup-cancel-button" onClick={cancelDeploy}>
-                取消部署
+            <button
+              type="button"
+              className="setup-primary-button"
+              disabled={deviceQuerying}
+              onClick={() => void confirmDeviceSelection()}
+            >
+              确认并启动服务 →
+            </button>
+            {devices.length > 0 && (
+              <button
+                type="button"
+                className="setup-secondary-button"
+                onClick={skipDeviceSelection}
+              >
+                使用默认设备
               </button>
-            ) : showDevicePicker ? (
-              <>
-                <button
-                  type="button"
-                  className="setup-primary-button"
-                  disabled={devices.length === 0 || deviceQuerying}
-                  onClick={() => void confirmDeviceSelection()}
-                >
-                  确认并启动
-                </button>
-                {devices.length > 0 && (
-                  <button
-                    type="button"
-                    className="setup-secondary-button"
-                    onClick={skipDeviceSelection}
-                  >
-                    使用默认设备
-                  </button>
-                )}
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  className="setup-primary-button"
-                  disabled={!step2Enabled}
-                  onClick={() => void runDeploy()}
-                >
-                  开始一键部署
-                </button>
-                {onSkip && (
-                  <button
-                    type="button"
-                    className="setup-secondary-button"
-                    onClick={onSkip}
-                  >
-                    跳过配置
-                  </button>
-                )}
-              </>
             )}
           </div>
+
+          <p className="setup-footnote">
+            配置完成后将自动进入写作界面。
+          </p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="setup-root">
+      <section className="setup-card" aria-labelledby="setup-title">
+        <div className="setup-header-row">
+          <div className="setup-brand">PickWord</div>
+          {onSkip && currentStep < 3 && (
+            <button type="button" className="setup-skip-link" onClick={onSkip}>
+              跳过配置，先体验写作 →
+            </button>
+          )}
         </div>
+
+        <h1 id="setup-title">准备本地写作模型</h1>
+        <p className="setup-description">
+          检测电脑硬件，一键部署推荐的本地大语言模型与 llama.cpp 推理环境。
+        </p>
+
+        {/* ── 步骤导航条 ── */}
+        <div className="setup-step-bar" aria-label="安装向导步骤">
+          {[
+            { step: 1, label: "1. 硬件检测" },
+            { step: 2, label: "2. 引擎与模型" },
+            { step: 3, label: "3. 下载与部署" },
+            { step: 4, label: "4. 设备与启动" },
+          ].map((s) => {
+            const isCurrent = currentStep === s.step;
+            const isCompleted = currentStep > s.step;
+            return (
+              <button
+                key={s.step}
+                type="button"
+                className={`setup-step-pill ${isCurrent ? "is-active" : ""} ${isCompleted ? "is-done" : ""}`}
+                disabled={deploying || (s.step === 2 && !step2Enabled) || s.step > currentStep}
+                onClick={() => {
+                  if (s.step === 1 || (s.step === 2 && step2Enabled)) {
+                    setCurrentStep(s.step as WizardStep);
+                  }
+                }}
+              >
+                <span className="step-num">{isCompleted ? "✓" : s.step}</span>
+                <span className="step-text">{s.label.split(". ")[1]}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {error && (
+          <div className="setup-status is-error" role="alert">
+            <strong>环境异常</strong>
+            <span>{error}</span>
+          </div>
+        )}
+        {state && !state.configured && !error && (
+          <div className="setup-status">
+            <strong>需要配置</strong>
+            <span>{state.message}</span>
+          </div>
+        )}
+
+        {/* ═══════ 步骤 1：硬件检测 ═══════ */}
+        {currentStep === 1 && (
+          <div className="setup-section setup-step-pane">
+            <div className="setup-section-head">
+              <div>
+                <h2>第 1 步：硬件检测</h2>
+                <p className="setup-section-subtitle">识别 CPU、内存大小及可用 GPU 显卡，给出最佳运行建议。</p>
+              </div>
+              <button
+                className="setup-secondary-button"
+                type="button"
+                disabled={detecting}
+                onClick={() => void runDetection()}
+              >
+                {detecting ? "正在检测…" : hardware ? "重新检测" : "开始检测"}
+              </button>
+            </div>
+
+            {detectError && (
+              <div className="setup-status is-error" style={{ marginTop: 12 }}>
+                <span>{detectError}</span>
+              </div>
+            )}
+
+            {hardware ? (
+              <>
+                <dl className="setup-facts">
+                  <div>
+                    <dt>处理器</dt>
+                    <dd>
+                      {hardware.cpu.name}
+                      <small>
+                        {hardware.cpu.physicalCores !== null
+                          ? `${hardware.cpu.physicalCores} 核 ${hardware.cpu.logicalCores} 线程`
+                          : `物理核心未知 · ${hardware.cpu.logicalCores} 逻辑处理器`}
+                        {hardware.cpu.isKnownMultiCcd ? " · 多 CCD" : ""}
+                      </small>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>内存</dt>
+                    <dd>{formatBytes(hardware.ramBytes)}</dd>
+                  </div>
+                  {hardware.gpus.length === 0 ? (
+                    <div>
+                      <dt>显卡</dt>
+                      <dd>未检测到独立显卡</dd>
+                    </div>
+                  ) : (
+                    hardware.gpus.map((gpu, i) => (
+                      <div key={`${gpu.name}-${i}`}>
+                        <dt>显卡</dt>
+                        <dd>
+                          {gpu.name}
+                          <small>
+                            显存 {formatBytes(gpu.vramBytes)}
+                            {gpu.vramBytes !== null ? `（来源: ${gpu.vramSource}）` : ""}
+                            {gpu.isIntegrated ? " · 集成显卡" : " · 独立显卡"}
+                          </small>
+                        </dd>
+                      </div>
+                    ))
+                  )}
+                  {hardware.nvidiaDriverVersion && (
+                    <div>
+                      <dt>NVIDIA 驱动</dt>
+                      <dd>{hardware.nvidiaDriverVersion}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                {rec && (
+                  <div className="setup-recommend">
+                    <strong>
+                      推荐引擎：{BACKEND_KIND_LABEL[rec.kind]}
+                      {rec.cudaVersion ? `（CUDA ${rec.cudaVersion}）` : ""}
+                    </strong>
+                    <span>{rec.reason}</span>
+                    <span>建议线程数：{rec.recommendedThreads ?? "请手动设置"}。{rec.threadsNote}</span>
+                  </div>
+                )}
+
+                {hardware.warnings.length > 0 && (
+                  <ul className="setup-warnings">
+                    {hardware.warnings.map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                )}
+
+                <div className="setup-actions">
+                  <button
+                    type="button"
+                    className="setup-primary-button"
+                    onClick={() => setCurrentStep(2)}
+                  >
+                    下一步：选择引擎与模型 →
+                  </button>
+                  {onSkip && (
+                    <button type="button" className="setup-secondary-button" onClick={onSkip}>
+                      跳过配置
+                    </button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="setup-empty-detect">
+                <p>点击上方「开始检测」按钮，向导将自动评估此电脑支持的加速方式。</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══════ 步骤 2：引擎与模型 ═══════ */}
+        {currentStep === 2 && (
+          <div className="setup-section setup-step-pane">
+            <div className="setup-section-head">
+              <div>
+                <h2>第 2 步：引擎与模型配置</h2>
+                <p className="setup-section-subtitle">选择推理后端，指定模型版本与文件保存目录。</p>
+              </div>
+            </div>
+
+            {/* 运行引擎 */}
+            <div className="setup-form-row">
+              <label>运行引擎</label>
+              <select disabled={deploying} value={backendKind} onChange={(e) => setBackendKind(e.target.value as BackendKind)}>
+                <option value="cuda">NVIDIA CUDA（最快）</option>
+                <option value="rocm">AMD HIP/ROCm（部分型号较快）</option>
+                <option value="vulkan">Vulkan（通用 GPU）</option>
+                <option value="cpu">纯 CPU</option>
+              </select>
+            </div>
+
+            {backendKind === "cuda" && (
+              <div className="setup-form-row">
+                <label>CUDA 版本</label>
+                <select disabled={deploying} value={cudaVersion} onChange={(e) => setCudaVersion(e.target.value as "12.4" | "13.x")}>
+                  <option value="12.4">CUDA 12.4（兼容 GTX 9xx ~ RTX 40 系）</option>
+                  <option value="13.x">CUDA 13.x（RTX 50 系必选）</option>
+                </select>
+              </div>
+            )}
+
+            <div className="setup-form-row">
+              <label>CPU 线程数</label>
+              <input type="number" disabled={deploying} min={1} max={128} value={threads} onChange={(e) => setThreads(Number(e.target.value))} />
+              {rec && <p className="setup-hint">{rec.threadsNote}</p>}
+            </div>
+
+            {/* 引擎来源 */}
+            <div className="setup-form-row">
+              <label className="setup-radio-label">
+                <input type="radio" name="engineSource" disabled={deploying} checked={engineSource === "auto"} onChange={() => setEngineSource("auto")} />
+                {" "}自动下载推荐版本的 llama.cpp
+              </label>
+            </div>
+            <div className="setup-form-row">
+              <label className="setup-radio-label">
+                <input type="radio" name="engineSource" disabled={deploying} checked={engineSource === "local"} onChange={() => setEngineSource("local")} />
+                {" "}使用本地已有的 llama-server（高级）
+              </label>
+              {engineSource === "local" && (
+                <div className="radio-content">
+                  <div className="setup-input-browse-group">
+                    <input
+                      type="text"
+                      disabled={deploying}
+                      value={localExePath}
+                      onChange={(e) => setLocalExePath(e.target.value)}
+                      placeholder="例如 D:\llama-server\llama-server.exe"
+                    />
+                    <button
+                      type="button"
+                      className="setup-browse-button"
+                      disabled={deploying}
+                      onClick={() => void chooseLocalExeFile()}
+                      title="打开文件管理器选择 exe"
+                    >
+                      <Icon name="open" size={15} />
+                      浏览…
+                    </button>
+                  </div>
+                  <p className="setup-hint">支持手动填入或通过系统文件选择器选取本地 llama-server.exe。</p>
+                </div>
+              )}
+            </div>
+
+            {/* 文件存放目录 */}
+            {(engineSource === "auto" || modelSource === "preset") && (
+              <div className="setup-form-row">
+                <label>文件存放目录（建议选择剩余空间充裕的磁盘）</label>
+                <div className="setup-input-browse-group">
+                  <input
+                    type="text"
+                    disabled={deploying}
+                    value={targetDir}
+                    onChange={(e) => setTargetDir(e.target.value)}
+                    placeholder="例如 D:\PickWordData"
+                  />
+                  <button
+                    type="button"
+                    className="setup-browse-button"
+                    disabled={deploying}
+                    onClick={() => void chooseTargetDirectory()}
+                    title="打开系统文件夹选择器"
+                  >
+                    <Icon name="folder" size={15} />
+                    选择目录…
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 模型来源 */}
+            <div className="setup-form-row">
+              <label className="setup-radio-label">
+                <input type="radio" name="modelSource" disabled={deploying} checked={modelSource === "preset"} onChange={() => setModelSource("preset")} />
+                {" "}下载预设推荐模型（推荐）
+              </label>
+              {modelSource === "preset" && (
+                <div className="radio-content">
+                  {MODEL_PRESETS.map((m) => (
+                    <label key={m.id} className="model-radio">
+                      <input type="radio" disabled={deploying} checked={selectedPresetUrl === m.url} onChange={() => setSelectedPresetUrl(m.url)} />
+                      <div>
+                        <strong>{m.name}</strong>
+                        <span>{m.sizeLabel}</span>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="setup-form-row">
+              <label className="setup-radio-label">
+                <input type="radio" name="modelSource" disabled={deploying} checked={modelSource === "local"} onChange={() => setModelSource("local")} />
+                {" "}使用本地已有的模型文件（.gguf）
+              </label>
+              {modelSource === "local" && (
+                <div className="radio-content">
+                  <div className="setup-input-browse-group">
+                    <input
+                      type="text"
+                      disabled={deploying}
+                      value={localModelPath}
+                      onChange={(e) => setLocalModelPath(e.target.value)}
+                      placeholder="粘贴或选取 .gguf 文件的完整路径"
+                    />
+                    <button
+                      type="button"
+                      className="setup-browse-button"
+                      disabled={deploying}
+                      onClick={() => void chooseLocalModelFile()}
+                      title="打开文件管理器选择 gguf"
+                    >
+                      <Icon name="open" size={15} />
+                      浏览…
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="setup-actions">
+              <button
+                type="button"
+                className="setup-secondary-button"
+                onClick={() => setCurrentStep(1)}
+              >
+                ← 上一步
+              </button>
+              <button
+                type="button"
+                className="setup-primary-button"
+                onClick={() => void runDeploy()}
+              >
+                开始一键部署 →
+              </button>
+              {onSkip && (
+                <button type="button" className="setup-secondary-button" onClick={onSkip}>
+                  跳过配置
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ═══════ 步骤 3：部署与下载进度 ═══════ */}
+        {currentStep === 3 && (
+          <div className="setup-section setup-step-pane">
+            <div className="setup-section-head">
+              <div>
+                <h2>第 3 步：下载与环境部署</h2>
+                <p className="setup-section-subtitle">
+                  {deploying ? "正在下载引擎与模型权重，请保持网络畅通。" : "部署环境配置。"}
+                </p>
+              </div>
+            </div>
+
+            {deployError && (
+              <div className="setup-status is-error" style={{ marginTop: 12 }}>
+                <span>{deployError}</span>
+              </div>
+            )}
+
+            {progress ? (
+              <div className="progress-box" style={{ marginTop: 16 }}>
+                <div className="progress-filename-row">
+                  <Icon name="upload" size={16} />
+                  <strong>{progress.filename}</strong>
+                </div>
+                <div className="progress-stats">
+                  {progress.totalBytes > 0 && (
+                    <span>{formatBytes(progress.receivedBytes)} / {formatBytes(progress.totalBytes)}</span>
+                  )}
+                  {progress.overallFraction !== undefined && (
+                    <span>{Math.round(progress.overallFraction * 100)}%</span>
+                  )}
+                </div>
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${(progress.overallFraction ?? 0) * 100}%` }} />
+                </div>
+              </div>
+            ) : (
+              <div className="setup-deploy-waiting">
+                {deploying ? (
+                  <p>正在初始化环境并连接下载源，请稍候…</p>
+                ) : (
+                  <p>准备就绪。若下载中断，可点击重新部署。</p>
+                )}
+              </div>
+            )}
+
+            <div className="setup-actions">
+              {deploying ? (
+                <button type="button" className="setup-cancel-button" onClick={cancelDeploy}>
+                  取消部署
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="setup-secondary-button"
+                    onClick={() => setCurrentStep(2)}
+                  >
+                    ← 返回修改配置
+                  </button>
+                  <button
+                    type="button"
+                    className="setup-primary-button"
+                    onClick={() => void runDeploy()}
+                  >
+                    重新部署
+                  </button>
+                  <button
+                    type="button"
+                    className="setup-secondary-button"
+                    onClick={() => void queryDevicesAndShow()}
+                  >
+                    直接查询设备 →
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ═══════ 步骤 4：设备选择与启动 ═══════ */}
+        {currentStep === 4 && (
+          <div className="setup-section setup-step-pane">
+            <div className="setup-section-head">
+              <div>
+                <h2>第 4 步：选择推理设备</h2>
+                <p className="setup-section-subtitle">确认用于 llama.cpp 运算的加速显卡并启动本地服务。</p>
+              </div>
+            </div>
+
+            {deployError && (
+              <div className="setup-status is-error" style={{ marginTop: 12 }}>
+                <span>{deployError}</span>
+              </div>
+            )}
+
+            <div className="setup-device-picker" style={{ marginTop: 16 }}>
+              {deviceQuerying ? (
+                <p>正在查询可用计算设备…</p>
+              ) : devices.length === 0 ? (
+                <p className="setup-device-empty">
+                  未检测到专属 GPU 设备。将使用默认设备配置启动服务。
+                  <br />
+                  <small>可在启动后随时在设置面板中重新切换设备或调整后端参数。</small>
+                </p>
+              ) : devices.length === 1 ? (
+                <>
+                  <p>已识别到可用设备：</p>
+                  <div className="setup-device-list">
+                    {devices.map((device) => (
+                      <div key={device.id} className="setup-device-option is-selected">
+                        <div className="setup-device-info">
+                          <strong>{device.id}</strong>
+                          <span className="setup-device-name">{device.name}</span>
+                          {device.freeVramBytes !== null && (
+                            <span className="setup-device-vram">
+                              可用显存 {formatBytes(device.freeVramBytes)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="setup-device-list">
+                  {devices.map((device) => (
+                    <label key={device.id} className={`setup-device-option ${selectedDevice === device.id ? "is-selected" : ""}`}>
+                      <input
+                        type="radio"
+                        name="backendDevice"
+                        value={device.id}
+                        checked={selectedDevice === device.id}
+                        onChange={() => setSelectedDevice(device.id)}
+                      />
+                      <div className="setup-device-info">
+                        <strong>{device.id}</strong>
+                        <span className="setup-device-name">{device.name}</span>
+                        {device.freeVramBytes !== null && (
+                          <span className="setup-device-vram">
+                            可用显存 {formatBytes(device.freeVramBytes)}
+                          </span>
+                        )}
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="setup-actions">
+              <button
+                type="button"
+                className="setup-primary-button"
+                disabled={deviceQuerying}
+                onClick={() => void confirmDeviceSelection()}
+              >
+                确认并启动服务 →
+              </button>
+              {devices.length > 0 && (
+                <button
+                  type="button"
+                  className="setup-secondary-button"
+                  onClick={skipDeviceSelection}
+                >
+                  使用默认设备
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <p className="setup-footnote">
           部署完成后将自动进入写作界面。也可以跳过配置直接进入（模型功能暂不可用）。

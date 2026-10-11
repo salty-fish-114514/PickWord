@@ -442,7 +442,7 @@ export function LibraryHome({
                           {entry.sourceFormat.toUpperCase()}
                         </span>
                         <span className="manuscript-excerpt">{entry.excerpt || "在这里开始写作。"}</span>
-                        <span className="manuscript-watermark">PickWord · 本地写作</span>
+                        <span className="manuscript-watermark">{entry.characterCount.toLocaleString("zh-CN")} 字</span>
                       </button>
 
                       {selecting ? (

@@ -7,7 +7,7 @@ import {
 } from "react";
 
 import { SetupWizard } from "./components/SetupWizard";
-import type { SetupState } from "./lib/types";
+import type { ExistingBackendConfig, SetupState } from "./lib/types";
 
 /**
  * 使用动态 import：
@@ -18,14 +18,16 @@ const App = lazy(() => import("./App"));
 type BootPhase =
   | { kind: "checking" }
   | { kind: "setup"; state: SetupState; skipped?: boolean }
+  | { kind: "deviceSetup"; existingConfig: ExistingBackendConfig }
   | { kind: "app"; skippedSetup?: boolean }
   | { kind: "error"; message: string };
 
 /**
  * renderer 的真正入口：
  *
- *   未配置 → 只显示 SetupWizard（但用户可跳过直接进入 App）
- *   已配置 → 才动态加载现有 App
+ *   未配置 → 显示 SetupWizard（但用户可跳过直接进入 App）
+ *   已配置 → 动态加载现有 App
+ *   有现有配置但配置不完整 → 直接进入设备选择步骤（deviceSetup）
  *
  * 「跳过配置」和「重新配置」两种场景都会显示 SetupWizard：
  *   - 跳过：从 app 阶段回退到 setup 阶段，完成后回来
@@ -47,11 +49,17 @@ export default function Bootstrap() {
 
     try {
       const state = await getSetupState();
-      setPhase(
-        state.configured
-          ? { kind: "app" }
-          : { kind: "setup", state },
-      );
+      if (state.needsDeviceSelection && state.existingConfig) {
+        // 配置有效（所有必需参数齐全、文件存在），只缺 --device → 设备选择 UI
+        setPhase({ kind: "deviceSetup", existingConfig: state.existingConfig });
+      } else if (state.configured) {
+        // 完整配置（含 --device）→ 进入 app
+        setPhase({ kind: "app" });
+      } else {
+        // 任何配置问题（参数缺失、文件丢失、JSON 损坏等）→ 完整向导
+        // 如果 existingConfig 存在，SetupWizard 会用它预填表单
+        setPhase({ kind: "setup", state });
+      }
     } catch (error) {
       setPhase({
         kind: "error",
@@ -76,20 +84,31 @@ export default function Bootstrap() {
   }, []);
 
   /**
-   * 从 App 内触发「重新配置模型」：回到 SetupWizard。
+   * 从 App 内触发「重新配置模型」：总是显示完整 SetupWizard。
    * 完成后（部署成功）再回到 App。
    */
   const handleReconfigure = useCallback(() => {
-    setPhase({ kind: "setup", state: null as unknown as SetupState, skipped: true });
-    // 重新检查实际状态
+    // 异步查询实际状态，但无论如何都显示完整 SetupWizard
     void (async () => {
       try {
         const state = await window.api?.getSetupState?.();
-        if (state) {
-          setPhase({ kind: "setup", state, skipped: true });
-        }
+        const setupState = state ?? {
+          configured: false,
+          configPath: "",
+          message: "尚未完成本地模型设置。"
+        };
+        setPhase({ kind: "setup", state: setupState, skipped: true });
       } catch {
-        // 保持当前状态
+        // 查询失败，显示完整 SetupWizard
+        setPhase({
+          kind: "setup",
+          state: {
+            configured: false,
+            configPath: "",
+            message: "无法读取配置，请重新配置。"
+          },
+          skipped: true
+        });
       }
     })();
   }, []);
@@ -147,6 +166,18 @@ export default function Bootstrap() {
       <SetupWizard
         state={null}
         error={phase.message}
+        checking={false}
+        onRefresh={refresh}
+        onSkip={handleSkip}
+      />
+    );
+  }
+
+  if (phase.kind === "deviceSetup") {
+    return (
+      <SetupWizard
+        state={null}
+        existingConfig={phase.existingConfig}
         checking={false}
         onRefresh={refresh}
         onSkip={handleSkip}

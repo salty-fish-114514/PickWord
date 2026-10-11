@@ -171,11 +171,32 @@ export type SetupProblem =
   | "missing-backend"
   | "missing-model";
 
+/**
+ * 现有的后端配置（用于旧版本升级后复用）。
+ * 当 backend.json 存在但配置不完整时（如缺少 --device 参数），
+ * 可以复用这些信息，避免用户重新配置整个流程。
+ */
+export interface ExistingBackendConfig {
+  exe: string;
+  model: string;
+  port: number;
+  args: string[];
+  startupTimeoutSec: number;
+}
+
 export interface SetupState {
   configured: boolean;
   configPath: string;
   problem?: SetupProblem;
   message: string;
+  /** 现有的后端配置（仅当 configured=false 但文件存在时有值） */
+  existingConfig?: ExistingBackendConfig;
+  /**
+   * 配置有效但 args 中缺少 --device 参数。
+   * renderer 应只显示设备选择步骤，而非完整向导。
+   * 只有 configured=true 时才可能为 true。
+   */
+  needsDeviceSelection?: boolean;
 }
 
 export type GpuVendor = "nvidia" | "amd" | "intel" | "unknown";

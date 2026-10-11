@@ -106,7 +106,7 @@ export function CandidatePopover({
               onClick={() => onPick(index)}
             >
               <span className="candidate-number">{index < 9 ? index + 1 : "0"}</span>
-              <span className="candidate-word">{candidate.text === "\n" ? "↵ 换行" : candidate.text}</span>
+              <span className="candidate-word">{candidate.text === "\n\n" ? "↵↵ 段落" : candidate.text === "\n" ? "↵ 换行" : candidate.text}</span>
               <span className="candidate-probability">
                 <span className="probability-track">
                   <span style={{ width: `${Math.min(100, Math.round(candidate.prob * 100 * 6))}%` }} />

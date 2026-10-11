@@ -355,14 +355,35 @@ async function detectGpus(
   warnings: string[]
 ): Promise<{ gpus: GpuInfo[]; nvidiaDriverVersion: string | null }> {
   // ① WMI 作为「存在哪些显卡」的权威名单
-  const wmiData = await runPsJson(
-    `Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json`
-  )
+  // WMI 查询可能不稳定，添加重试机制确保可靠性
+  let wmiData: unknown | null = null
+  let wmiAttempts = 0
+  const MAX_WMI_ATTEMPTS = 3
+  
+  while (wmiData === null && wmiAttempts < MAX_WMI_ATTEMPTS) {
+    wmiData = await runPsJson(
+      `Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json`
+    )
+    wmiAttempts++
+    
+    // 如果返回 null 且有重试机会，等待一小段时间
+    if (wmiData === null && wmiAttempts < MAX_WMI_ATTEMPTS) {
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
+  
   const wmiRows = asArray(wmiData).filter(
     (row) => typeof row.Name === 'string' && !VIRTUAL_GPU_PATTERN.test(row.Name as string)
   )
+  
   if (wmiRows.length === 0) {
-    warnings.push('没有检测到任何显卡(WMI 查询失败或为空),将按纯 CPU 处理。')
+    if (wmiAttempts > 1) {
+      warnings.push(`WMI 查询显卡信息失败，已重试 ${wmiAttempts} 次。将按纯 CPU 处理。`)
+    } else {
+      warnings.push('没有检测到任何显卡(WMI 查询失败或为空),将按纯 CPU 处理。')
+    }
+  } else if (wmiAttempts > 1) {
+    warnings.push(`WMI 查询显卡信息不稳定，已重试 ${wmiAttempts} 次才成功。`)
   }
 
   // ② 两个增强来源并行查

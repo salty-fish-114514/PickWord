@@ -1,0 +1,327 @@
+/* ═══════════════════════════════════════════════════════════════
+   settings.css · 设置面板（基本页 + 高级页，SettingsPanel 组件）
+   § S1 面板容器           § S2 设置卡片与文字
+   § S3 滑杆、主题、开关与下拉     § S4 保存位置、模型配置与恢复默认
+   § S5 高级页入口与返回
+   侧栏通用框架（.side-panel / .panel-heading）见 base.css § B4；
+   开关 .switch 与次要按钮 .quiet-button 见 base.css § B3。
+   ═══════════════════════════════════════════════════════════════ */
+
+
+/* ═══════ § S1. 面板容器 ═══════ */
+
+.settings-panel {
+  flex-basis: 394px;
+  border-right: 0;
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.05);
+  animation-name: panelEnterRight;
+}
+
+
+/* ═══════ § S2. 设置卡片与文字 ═══════
+   每个设置项是一张独立卡片：标题 + 当前值徽标 + 控件 + 说明。 */
+
+.setting-block {
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  transition: border-color 140ms ease;
+}
+
+.setting-block:hover {
+  border-color: var(--accent-border);
+}
+
+.setting-label-row,
+.setting-title {
+  color: var(--ink);
+  font-size: calc(12px * var(--ui-scale));
+  font-weight: 500;
+}
+
+.setting-title {
+  display: block;
+}
+
+.setting-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.setting-label-row output {
+  flex-shrink: 0;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.setting-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.65;
+}
+
+/* 高级页的分组标题：左侧一段两色竖线，与顶栏色条呼应 */
+.settings-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 14px;
+  color: var(--ink);
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.settings-group-title::before {
+  width: 3px;
+  height: 0.9em;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--pw-gold), var(--pw-sage));
+  content: "";
+}
+
+.settings-group-title:not(:first-of-type) {
+  margin-top: 26px;
+}
+
+.settings-footnote {
+  margin: 6px 0 0;
+  color: var(--faint);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.7;
+}
+
+
+/* ═══════ § S3. 滑杆、主题、开关与下拉 ═══════ */
+
+.range-input {
+  display: block;
+  width: 100%;
+  height: 17px;
+  margin: 14px 0 4px;
+  accent-color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.range-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--faint);
+  font-size: calc(9px * var(--ui-scale));
+  font-variant-numeric: tabular-nums;
+}
+
+.theme-block {
+  padding-bottom: 16px;
+}
+
+/* 阅读主题：左右两张选择卡 */
+.theme-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.theme-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 45px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--field-bg);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 500;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.theme-option:hover {
+  border-color: var(--accent-border);
+  color: var(--ink);
+}
+
+.theme-option.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  box-shadow: 0 0 0 1px var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+/* 「标题 + 说明 + 开关」一行：快速模式、浮窗常驻 */
+.quick-mode-block {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.quick-mode-copy {
+  min-width: 0;
+}
+
+.quick-mode-copy p {
+  max-width: none;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.65;
+}
+
+.quick-mode-block .switch {
+  margin-top: 4px;
+}
+
+.select-field {
+  width: 100%;
+  height: 45px;
+  padding: 0 12px;
+  margin-top: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  outline: none;
+  background: var(--field-bg);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: calc(12px * var(--ui-scale));
+}
+
+.select-field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+
+/* ═══════ § S4. 保存位置、模型配置与恢复默认 ═══════ */
+
+.library-folder-setting {
+  margin-top: 0;
+}
+
+.library-folder-path {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 37px;
+  margin-top: 11px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--field-bg);
+  color: var(--ink-soft);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.library-folder-path svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.library-folder-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* 模型与推理引擎：暖色配置卡，提醒这里的改动会重新加载模型 */
+.reconfigure-block {
+  border-color: color-mix(in srgb, var(--pw-gold) 35%, var(--line));
+  background: color-mix(in srgb, var(--pw-gold) 7%, var(--paper));
+}
+
+.reconfigure-block .quiet-button {
+  margin-top: 12px;
+}
+
+.reconfigure-warning {
+  color: color-mix(in srgb, var(--pw-gold) 55%, var(--ink-soft));
+}
+
+.reset-button {
+  width: 100%;
+  margin: 8px 0 18px;
+  border-color: rgba(179, 100, 88, 0.4);
+  color: var(--danger);
+}
+
+.reset-button:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: rgba(179, 100, 88, 0.08);
+  color: var(--danger);
+}
+
+
+/* ═══════ § S5. 高级页入口与返回 ═══════ */
+
+.advanced-entry {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 62px;
+  padding: 12px 16px;
+  margin: 4px 0 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: calc(12px * var(--ui-scale));
+  font-weight: 600;
+  text-align: left;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.advanced-entry:hover {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.advanced-entry svg {
+  color: var(--accent);
+}
+
+.advanced-entry-caption {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  font-weight: 400;
+  white-space: normal;
+}
+
+.back-link {
+  align-self: flex-start;
+  padding: 5px 12px;
+  margin: -12px 0 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 600;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

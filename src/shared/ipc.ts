@@ -84,19 +84,45 @@ export type SetupProblem =
   | 'missing-model'
 
 /**
+ * 现有的后端配置（用于旧版本升级后复用）。
+ * 当 backend.json 存在但配置不完整时（如缺少 --device 参数），
+ * 可以复用这些信息，避免用户重新配置整个流程。
+ */
+export interface ExistingBackendConfig {
+  exe: string
+  model: string
+  port: number
+  args: string[]
+  startupTimeoutSec: number
+}
+
+/**
  * 应用启动时由主进程检查。
  *
- * configured=true：
- *   配置可解析，并且 llama-server.exe 和模型文件都存在。
+ * configured=true 且 needsDeviceSelection=false：
+ *   配置完整（含 --device），可直接启动后端。
+ *
+ * configured=true 且 needsDeviceSelection=true：
+ *   配置有效但 args 中没有 --device，需要用户选择设备。
+ *   renderer 只显示设备选择 UI，不走完整向导。
  *
  * configured=false：
  *   renderer 不挂载现有 App，只显示独立的 SetupWizard。
+ *   如果 existingConfig 存在，说明是旧版本升级，可以复用现有配置。
  */
 export interface SetupState {
   configured: boolean
   configPath: string
   problem?: SetupProblem
   message: string
+  /** 现有的后端配置（仅当 configured=false 但文件存在时有值） */
+  existingConfig?: ExistingBackendConfig
+  /**
+   * 配置有效但 args 中缺少 --device 参数。
+   * renderer 应只显示设备选择步骤，而非完整向导。
+   * 只有 configured=true 时才可能为 true。
+   */
+  needsDeviceSelection?: boolean
 }
 
 // ─── 硬件检测(首次设置向导用) ───────────────────────────────────

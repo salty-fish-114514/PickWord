@@ -1,0 +1,612 @@
+/* ═══════════════════════════════════════════════════════════════
+   base.css · 全局基础
+   § B1 重置            § B2 设计令牌          § B3 共享控件
+   § B4 侧栏框架        § B5 顶栏色条、品牌与本地模型状态
+   § B6 弹窗与日志      § B7 共享动效与减少动态
+   ═══════════════════════════════════════════════════════════════ */
+
+
+/* ═══════ § B1. 重置 ═══════ */
+
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  color-scheme: light;
+  background: #f1f0eb;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  min-width: 360px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+::selection {
+  background: rgba(66, 126, 204, 0.34);
+}
+
+
+/* ═══════ § B2. 设计令牌 ═══════
+   首次设置向导（.setup-root）由 Bootstrap 直接渲染，不在 .app-root 内，
+   所以浅色令牌同时挂在两个根元素上；向导不跟随深色主题。 */
+
+.app-root,
+.setup-root {
+  --app-bg: #f1f0eb;
+  --paper: #fbfaf6;
+  --paper-edge: #e7e5dd;
+  --ink: #292b27;
+  --ink-soft: #555951;
+  --muted: #898b83;
+  --faint: #a7a89f;
+  --line: #e1e0d8;
+  --line-strong: #d5d5cc;
+  --accent: #648675;
+  --accent-strong: #496e5b;
+  --accent-wash: #edf2ee;
+  --accent-border: #d3e0d7;
+  --panel-bg: #f7f6f1;
+  --field-bg: #fbfaf7;
+  --popover-bg: #fffefa;
+  --popover-shadow: 0 12px 36px rgba(40, 47, 39, 0.16), 0 2px 7px rgba(40, 47, 39, 0.08);
+  --sheet-shadow: 0 2px 7px rgba(56, 57, 49, 0.025), 0 16px 40px rgba(56, 57, 49, 0.035);
+  /*
+   * 两种「底色」刻意用不同色相，避免混淆：
+   *   选中文字 = 冷色（蓝），饱和度较高、不透明度较大；
+   *   送入模型的正文范围 = 暖色（琥珀），非常淡，只是「背景」。
+   */
+  --selection: rgba(66, 126, 204, 0.34);
+  --context-wash: rgba(205, 160, 66, 0.13);
+  --context-marker: #c49a48;
+  /* 两色强调：顶栏色条、TXT / MD 标签、进度条共用 */
+  --pw-gold: #d8ad52;
+  --pw-sage: #7fa789;
+  --danger: #b36458;
+  --editor-font-size: 18px;
+  /*
+   * 界面文字放大倍率：界面字号统一写成 calc(Npx * var(--ui-scale))。
+   * 正文编辑区字号由设置里的「正文字号」单独控制，不在此列。
+   */
+  --ui-scale: 1.6;
+}
+
+.app-root {
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--app-bg);
+  color: var(--ink);
+  transition: background-color 220ms ease, color 220ms ease;
+}
+
+.app-root[data-theme="dark"] {
+  color-scheme: dark;
+  --app-bg: #252925;
+  --paper: #2d322e;
+  --paper-edge: #3b423c;
+  --ink: #e3e3d9;
+  --ink-soft: #c0c3b9;
+  --muted: #9a9f95;
+  --faint: #777f76;
+  --line: #3b423c;
+  --line-strong: #4a524b;
+  --accent: #94b49f;
+  --accent-strong: #aec9b7;
+  --accent-wash: #343e37;
+  --accent-border: #4b6253;
+  --panel-bg: #292e2a;
+  --field-bg: #252a26;
+  --popover-bg: #343a35;
+  --popover-shadow: 0 14px 40px rgba(0, 0, 0, 0.33), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --sheet-shadow: 0 2px 7px rgba(0, 0, 0, 0.12), 0 16px 40px rgba(0, 0, 0, 0.08);
+  --selection: rgba(104, 160, 238, 0.44);
+  --context-wash: rgba(216, 178, 100, 0.12);
+  --context-marker: #d6b064;
+  --pw-gold: #c9a24a;
+  --pw-sage: #6f9a7b;
+  --danger: #d48b7f;
+}
+
+
+/* ═══════ § B3. 共享控件 ═══════
+   图标按钮、次要按钮、开关、链接按钮、键帽——写作页、文库与设置共用。 */
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 42px;
+  height: 42px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
+}
+
+.icon-button:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.icon-button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.icon-button:focus-visible,
+.quiet-button:focus-visible,
+.theme-option:focus-visible,
+.switch:focus-visible,
+.search-result:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.quiet-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 41px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 500;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.quiet-button:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.quiet-button-accent {
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.quiet-button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+/* 开关：原生 button + role="switch" */
+.switch {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  width: 40px;
+  height: 22px;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+
+.switch span {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition: transform 160ms ease;
+}
+
+.switch.is-on {
+  background: var(--accent);
+}
+
+.switch.is-on span {
+  transform: translateX(18px);
+}
+
+.switch-small {
+  width: 32px;
+  height: 19px;
+}
+
+.switch-small span {
+  width: 15px;
+  height: 15px;
+}
+
+.switch-small.is-on span {
+  transform: translateX(13px);
+}
+
+.link-button {
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.link-button:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+kbd {
+  display: inline-grid;
+  min-width: 21px;
+  height: 22px;
+  margin-right: 2px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: calc(9px * var(--ui-scale));
+}
+
+
+/* ═══════ § B4. 侧栏框架 ═══════
+   查找面板（左）、设置面板与上下文侧栏（右）共用；各自的内容样式见对应文件。 */
+
+.side-panel {
+  z-index: 8;
+  display: flex;
+  flex: 0 0 380px;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+  padding: 34px 22px 27px;
+  border-right: 1px solid var(--line);
+  background: var(--panel-bg);
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+  animation: panelEnterLeft 180ms ease-out both;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 31px;
+}
+
+.panel-eyebrow {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  letter-spacing: 0.12em;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Noto Serif SC", "Songti SC", SimSun, serif;
+  font-size: calc(20px * var(--ui-scale) * 0.85);
+  font-weight: 500;
+  letter-spacing: 0.035em;
+}
+
+.panel-close {
+  flex: 0 0 auto;
+  margin: -3px -5px 0 0;
+}
+
+/* 侧栏变宽、字变大后，窄窗口下改为浮层 */
+@media (max-width: 1180px) {
+  .side-panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: min(416px, calc(100vw - 22px));
+    box-shadow: 0 10px 35px rgba(34, 38, 34, 0.12);
+  }
+
+  .search-panel {
+    left: 0;
+  }
+
+  .settings-panel,
+  .context-sidebar {
+    right: 0;
+  }
+}
+
+@media (max-width: 860px) {
+  .side-panel {
+    width: min(320px, calc(100vw - 22px));
+  }
+}
+
+
+/* ═══════ § B5. 顶栏色条、品牌与本地模型状态 ═══════
+   写作页 .topbar 与文库 .library-topbar 共用同一条 3px 两色色条（左金右绿）。
+   两个顶栏自己的规则只能写 background-color，不能用 background 简写，否则会冲掉色条。 */
+
+.topbar,
+.library-topbar {
+  background-image: linear-gradient(90deg, var(--pw-gold) 0 50%, var(--pw-sage) 50% 100%);
+  background-repeat: no-repeat;
+  background-size: 100% 3px;
+}
+
+/* 品牌标志（BrandLogo 组件，首页与编辑器共用） */
+.brand-logo {
+  display: block;
+  object-fit: contain;
+  border-radius: 7px;
+  user-select: none;
+}
+
+.brand-logo-fallback {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--accent-border);
+  border-radius: 7px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  font-family: "Segoe UI", sans-serif;
+  font-size: 1.3em;
+  font-weight: 700;
+}
+
+/* 本地模型状态条（BackendStatusBar 组件）：状态点 + 文字；加载中显示进度 */
+.backend-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-soft);
+  font-size: calc(12px * var(--ui-scale));
+  white-space: nowrap;
+}
+
+.status-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #a4a79e;
+}
+
+.status-dot.is-loading {
+  background: #c79855;
+  animation: statusPulse 1.4s ease-in-out infinite;
+}
+
+.status-dot.is-ready {
+  background: #6b9a78;
+}
+
+.status-dot.is-error {
+  background: #c5776a;
+}
+
+.status-dot.is-stopped {
+  background: #a6a69f;
+}
+
+.backend-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: 6px;
+}
+
+.backend-actions button {
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.backend-actions button:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.backend-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.backend-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.backend-progress-track {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--line);
+}
+
+.backend-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transition: width 220ms ease-out;
+}
+
+.backend-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  white-space: nowrap;
+}
+
+.backend-progress-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.backend-progress-eta {
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 编辑器顶栏空间有限：进度条横向压缩，摘要和 ETA 挤在一行 */
+.backend-bar.is-compact {
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+}
+
+.backend-bar.is-compact .backend-progress {
+  width: clamp(140px, 18vw, 260px);
+}
+
+.backend-bar.is-compact .backend-progress-track {
+  height: 4px;
+}
+
+@media (max-width: 860px) {
+  .backend-bar.is-compact .backend-progress {
+    width: 120px;
+  }
+}
+
+@media (max-width: 560px) {
+  .backend-actions {
+    display: none;
+  }
+
+  .backend-status {
+    gap: 6px;
+    font-size: 10px;
+  }
+}
+
+
+/* ═══════ § B6. 弹窗与日志 ═══════ */
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 24, 21, 0.38);
+  animation: fadeIn 140ms ease-out both;
+}
+
+.log-dialog {
+  width: min(560px, 100%);
+  max-height: min(70vh, 620px);
+  overflow: auto;
+  padding: 25px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: var(--popover-shadow);
+}
+
+.log-dialog .panel-heading {
+  margin-bottom: 20px;
+}
+
+.log-dialog pre {
+  min-height: 90px;
+  max-height: 42vh;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--field-bg);
+  color: var(--ink-soft);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: calc(11px * var(--ui-scale));
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+
+/* ═══════ § B7. 共享动效与减少动态 ═══════ */
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes panelEnterLeft {
+  from { opacity: 0; transform: translateX(-9px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes panelEnterRight {
+  from { opacity: 0; transform: translateX(9px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes statusPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(199, 152, 85, 0.32); }
+  50% { box-shadow: 0 0 0 4px rgba(199, 152, 85, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

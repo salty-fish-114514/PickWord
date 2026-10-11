@@ -1,0 +1,1225 @@
+/* ═══════════════════════════════════════════════════════════════
+   editor.css · 写作页
+   § E1 顶栏与工具栏       § E2 纸面与编辑区       § E3 底部状态栏
+   § E4 查找面板           § E5 写作上下文侧边栏   § E6 候选浮层
+   § E7 文件提示条         § E8 Toast 弱提醒       § E9 响应式
+   ═══════════════════════════════════════════════════════════════ */
+
+
+/* ═══════ § E1. 顶栏与工具栏 ═══════
+   两色色条见 base.css § B5（与文库顶栏共用）。 */
+
+.topbar {
+  z-index: 12;
+  display: flex;
+  flex: 0 0 79px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0 clamp(19px, 3.2vw, 48px);
+  border-bottom: 1px solid var(--line);
+  background-color: var(--app-bg);
+  transition: background-color 220ms ease, border-color 220ms ease;
+}
+
+.brand-area,
+.brand-copy,
+.toolbar {
+  display: flex;
+  align-items: center;
+}
+
+.brand-area {
+  min-width: 0;
+  gap: 12px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  color: var(--accent-strong);
+}
+
+.brand-mark svg {
+  width: 30px;
+  height: 30px;
+  stroke: currentColor;
+  stroke-width: 1.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 220ms ease;
+}
+
+.brand-mark:hover svg {
+  transform: rotate(-7deg) translateY(-1px);
+}
+
+.brand-copy {
+  align-items: baseline;
+  gap: 9px;
+  white-space: nowrap;
+}
+
+.brand-name {
+  color: var(--ink);
+  font-family: "Noto Serif SC", "Songti SC", SimSun, serif;
+  font-size: calc(19px * var(--ui-scale) * 0.85);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+}
+
+.brand-caption {
+  color: var(--muted);
+  font-size: calc(11px * var(--ui-scale));
+  letter-spacing: 0.04em;
+}
+
+.topbar-divider,
+.toolbar-divider {
+  width: 1px;
+  height: 19px;
+  margin: 0 5px 0 7px;
+  background: var(--line-strong);
+}
+
+.toolbar {
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.toolbar-divider {
+  margin: 0 6px;
+}
+
+/* 工具按钮与 .icon-button 组合使用：<button class="icon-button tool-button"> */
+.tool-button {
+  min-width: 90px;
+  padding: 0 9px;
+  color: var(--ink-soft);
+  font-size: calc(12px * var(--ui-scale));
+}
+
+.tool-button.is-active {
+  border-color: var(--accent-border);
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.history-button {
+  width: 42px;
+  padding: 0;
+}
+
+.autosave-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 42px;
+  padding: 0 9px 0 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+  white-space: nowrap;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.autosave-toggle:hover {
+  border-color: var(--line);
+  color: var(--ink-soft);
+}
+
+.editor-back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 5px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: calc(12px * var(--ui-scale));
+  white-space: nowrap;
+}
+
+.editor-back-button:hover:not(:disabled) {
+  color: var(--accent-strong);
+}
+
+.editor-back-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+
+/* ═══════ § E2. 纸面与编辑区 ═══════ */
+
+.workspace {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--app-bg);
+  transition: background-color 220ms ease;
+}
+
+.editor-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  padding: 31px clamp(16px, 3.7vw, 50px) 54px;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.document-sheet {
+  width: min(100%, 930px);
+  min-height: calc(100vh - 151px);
+  margin: 0 auto;
+  border: 1px solid var(--paper-edge);
+  background: var(--paper);
+  box-shadow: var(--sheet-shadow);
+  transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.writing-column {
+  width: min(100%, 780px);
+  min-height: inherit;
+  margin: 0 auto;
+  padding: 75px 24px 105px;
+}
+
+.document-heading {
+  margin: 0 0 35px;
+}
+
+.document-title {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
+  font-size: 31px;
+  font-weight: 500;
+  letter-spacing: 0.035em;
+  line-height: 1.45;
+}
+
+.document-title::placeholder {
+  color: var(--faint);
+}
+
+.document-title:focus-visible {
+  text-decoration: underline;
+  text-decoration-color: var(--accent-border);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 8px;
+}
+
+.title-rule {
+  display: block;
+  width: 34px;
+  height: 2px;
+  margin-top: 20px;
+  background: var(--accent);
+  opacity: 0.62;
+}
+
+.editor-shell {
+  position: relative;
+  width: 100%;
+}
+
+/* 高亮层与 textarea 必须共享完全相同的排版参数，否则浅背景会与文字错位 */
+.highlight-layer,
+.writing-area {
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", SimSun, serif;
+  font-size: var(--editor-font-size);
+  font-weight: 400;
+  letter-spacing: 0.025em;
+  line-height: 1.82;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 2;
+}
+
+/*
+ * 高亮层向左多伸出 20px 作为「页边」，用来画锚点标记；
+ * padding-left 把文字推回与 textarea 完全对齐的位置（内容宽度不变，换行位置才会一致）。
+ */
+.highlight-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: -20px;
+  z-index: 0;
+  overflow: hidden;
+  padding: 0 0 0 20px;
+  margin: 0;
+  border: 0;
+  color: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 送入模型的正文范围：暖色淡底，不加描边，与蓝色的「选中」一眼可分 */
+.context-span {
+  position: relative;
+  border-radius: 2px;
+  background: var(--context-wash);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* 锚点标记：画在送入正文范围的起始行左侧页边（同为暖色，和范围底色是一套） */
+.context-span.is-anchored::before {
+  position: absolute;
+  top: 0.32em;
+  left: -13px;
+  width: 4px;
+  height: 1.15em;
+  border-radius: 2px;
+  background: var(--context-marker);
+  content: "";
+  opacity: 0.85;
+}
+
+.writing-area {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: max(430px, calc(100vh - 355px));
+  min-height: 430px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--ink-soft);
+  caret-color: var(--accent-strong);
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+  transition: color 220ms ease, font-size 160ms ease;
+}
+
+.writing-area::placeholder {
+  color: var(--faint);
+  opacity: 0.75;
+}
+
+.writing-area::selection {
+  background: var(--selection);
+}
+
+
+/* ═══════ § E3. 底部状态栏 ═══════ */
+
+.statusbar {
+  z-index: 12;
+  display: grid;
+  flex: 0 0 60px;
+  grid-template-columns: 1fr minmax(220px, auto) 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 0 clamp(20px, 3.2vw, 48px);
+  border-top: 1px solid var(--line);
+  background: var(--app-bg);
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  transition: background-color 220ms ease, border-color 220ms ease;
+}
+
+.statusbar-left,
+.statusbar-right,
+.save-indicator {
+  display: flex;
+  align-items: center;
+}
+
+.statusbar-left {
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.character-count {
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+
+.statusbar-mode {
+  padding-left: 11px;
+  margin-left: 6px;
+  border-left: 1px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.statusbar-hint {
+  overflow: hidden;
+  color: var(--faint);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar-hint.is-notice {
+  color: var(--accent-strong);
+}
+
+.statusbar-right {
+  justify-content: flex-end;
+  gap: 17px;
+  white-space: nowrap;
+}
+
+.save-indicator {
+  gap: 7px;
+}
+
+.save-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #7b9d82;
+}
+
+.save-indicator.has-error {
+  color: #c2796b;
+}
+
+.save-indicator.has-error .save-dot {
+  background: #c2796b;
+}
+
+.demo-label {
+  padding-left: 15px;
+  border-left: 1px solid var(--line-strong);
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+
+
+/* ═══════ § E4. 查找面板 ═══════
+   侧栏框架（.side-panel / .panel-heading）见 base.css § B4。 */
+
+.field-label {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--ink-soft);
+  font-size: calc(12px * var(--ui-scale));
+  font-weight: 500;
+}
+
+.replace-label {
+  margin-top: 19px;
+}
+
+.text-field {
+  width: 100%;
+  height: 48px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  outline: none;
+  background: var(--field-bg);
+  color: var(--ink);
+  font-size: calc(12px * var(--ui-scale));
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 220ms ease;
+}
+
+.text-field::placeholder {
+  color: var(--faint);
+}
+
+.text-field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.replace-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.results-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 29px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 500;
+}
+
+.results-count {
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  font-weight: 400;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 8px;
+}
+
+.search-result {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  gap: 5px;
+  width: 100%;
+  min-height: 44px;
+  align-items: start;
+  padding: 9px 7px 8px 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.search-result:hover,
+.search-result.is-active {
+  border-color: var(--line);
+  background: var(--paper);
+}
+
+.result-index {
+  padding-top: 1px;
+  color: var(--faint);
+  font-size: calc(10px * var(--ui-scale));
+  font-variant-numeric: tabular-nums;
+}
+
+.result-context {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: calc(11px * var(--ui-scale));
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.result-context mark {
+  padding: 0 1px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.empty-results {
+  padding: 18px 5px;
+  color: var(--faint);
+  font-size: calc(11px * var(--ui-scale));
+}
+
+
+/* ═══════ § E5. 写作上下文侧边栏 ═══════ */
+
+.context-sidebar {
+  flex-basis: 411px;
+  border-right: 0;
+  border-left: 1px solid var(--line);
+  animation-name: panelEnterRight;
+}
+
+.mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  align-self: flex-start;
+  min-height: 34px;
+  padding: 0 12px;
+  margin-bottom: 22px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  font-size: calc(11px * var(--ui-scale));
+}
+
+/* 图例：区分「送入模型的正文」与「选中的文字」两种背景 */
+.range-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: -8px 0 18px;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.legend-swatch.is-context {
+  background: var(--context-wash);
+  box-shadow: inset 0 0 0 1px var(--context-marker);
+}
+
+.legend-swatch.is-selection {
+  background: var(--selection);
+}
+
+.context-block {
+  padding-bottom: 20px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.context-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.context-block-title {
+  color: var(--ink-soft);
+  font-size: calc(12px * var(--ui-scale));
+  font-weight: 500;
+}
+
+.context-textarea {
+  display: block;
+  width: 100%;
+  min-height: 104px;
+  padding: 10px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  outline: none;
+  resize: vertical;
+  background: var(--field-bg);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: calc(12px * var(--ui-scale));
+  line-height: 1.7;
+  transition: border-color 150ms ease, box-shadow 150ms ease, opacity 180ms ease;
+}
+
+.context-textarea::placeholder {
+  color: var(--faint);
+}
+
+.context-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.context-textarea.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.context-textarea.is-highlighted {
+  border-color: var(--accent);
+  animation: outlinePulse 1.5s ease-out 1;
+}
+
+.context-hint {
+  margin: 8px 0 0;
+  color: var(--faint);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.65;
+}
+
+.anchor-block {
+  border-bottom: 0;
+}
+
+.anchor-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+}
+
+.anchor-hint {
+  margin: 9px 0 0;
+  color: var(--faint);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.7;
+}
+
+.anchor-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.anchor-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 35px;
+  padding: 0 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 5px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.anchor-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.anchor-actions .link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.anchor-notice {
+  margin: 9px 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(199, 152, 85, 0.35);
+  border-radius: 5px;
+  background: rgba(199, 152, 85, 0.1);
+  color: #a67c3d;
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.65;
+}
+
+.app-root[data-theme="dark"] .anchor-notice {
+  color: #d9b57c;
+}
+
+.context-footer {
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.context-meter {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.context-meter strong {
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-notices {
+  margin: 11px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-notices li {
+  position: relative;
+  padding-left: 13px;
+  margin-top: 8px;
+  color: var(--faint);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.7;
+}
+
+.context-notices li::before {
+  position: absolute;
+  top: 7px;
+  left: 2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  content: "";
+  opacity: 0.6;
+}
+
+/* 滑动窗口信息行（WritingEditor 中使用） */
+.window-line {
+  font-size: calc(10px * var(--ui-scale));
+}
+
+.window-tag {
+  font-size: calc(9px * var(--ui-scale));
+}
+
+@keyframes outlinePulse {
+  0% { box-shadow: 0 0 0 0 var(--accent-wash); }
+  40% { box-shadow: 0 0 0 5px var(--accent-wash); }
+  100% { box-shadow: 0 0 0 0 var(--accent-wash); }
+}
+
+
+/* ═══════ § E6. 候选浮层 ═══════
+   深色半透明的紧凑列表：序号 · 候选词 · 概率，纵向排列。
+   · 标题行、页码、概率条、底部快捷键说明不显示；DOM 与键盘逻辑保持不变。
+   · 内部尺寸全部用 em，随 --ui-scale 一起缩放。
+   · 半透明靠背景色 alpha 实现，后方正文可透出；整体 opacity 只留给
+     .is-faded（长按穿透键 / 输入法组字），不要在别处改浮层的 opacity。
+   · 宽度随内容收缩，词与概率之间只有一个列间距。 */
+
+.candidate-popover {
+  position: fixed;
+  z-index: 30;
+  width: fit-content;
+  min-width: 6.5em;
+  max-width: min(11em, calc(100vw - 24px));
+  overflow: hidden;
+  padding: 0.2em;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.45em;
+  background: rgba(15, 18, 16, 0.52);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  color: #f5f8f3;
+  font-size: calc(12px * var(--ui-scale));
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+  color-scheme: dark;
+  /*
+   * 注意这里不能用 animation-fill-mode: both / forwards。
+   * 带 fill 的动画会在结束后持续「钉住」最后一帧的 opacity: 1，
+   * 优先级高于普通的 class 声明，导致 .is-faded 的 opacity 永远不生效。
+   */
+  animation: candidateEnter 160ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  transition: opacity 140ms ease;
+}
+
+/*
+ * 浮层淡化（长按穿透键 / 「浮窗常驻」时输入法组字）：
+ * 不透明度由设置里的「浮窗淡化透明度」决定（写进 --popover-fade-opacity），同时让出鼠标事件。
+ */
+.candidate-popover.is-faded {
+  pointer-events: none;
+  opacity: var(--popover-fade-opacity, 0.12);
+}
+
+/* 隐藏的说明性元素 */
+.candidate-heading,
+.candidate-heading-mark,
+.candidate-pending,
+.candidate-paging,
+.candidate-footer,
+.probability-track {
+  display: none;
+}
+
+/* 标题行隐藏后，「生成中」改为浮层顶部一条细的呼吸线 */
+.candidate-popover:has(.candidate-pending)::before {
+  position: absolute;
+  top: 0;
+  right: 0.5em;
+  left: 0.5em;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: #a8bda9;
+  content: "";
+  animation: candidatePending 1.2s ease-in-out infinite;
+}
+
+.candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: min(15em, 46vh);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.candidate-list.is-stale {
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+
+.candidate-row {
+  display: grid;
+  grid-template-columns: 1em minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 0.3em;
+  width: 100%;
+  min-height: 1.75em;
+  padding: 0.1em 0.3em;
+  border: 0;
+  border-radius: 0.25em;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.35;
+  text-align: left;
+  transition: background-color 100ms ease;
+}
+
+.candidate-row:hover,
+.candidate-row.is-selected {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.candidate-row:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.72);
+  outline-offset: -1px;
+}
+
+/* 数字键快速输入的编号：1–9，第十项为 0 */
+.candidate-number {
+  display: block;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #cad4cc;
+  font-size: 0.68em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.candidate-row.is-selected .candidate-number {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+.candidate-word {
+  min-width: 0;
+  overflow: hidden;
+  color: #fff;
+  font-family: "Noto Serif SC", "Songti SC", SimSun, serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-probability {
+  display: block;
+  min-width: 0;
+  text-align: right;
+}
+
+.probability-value {
+  display: block;
+  color: #b8c2b9;
+  font-size: 0.66em;
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate-row.is-selected .probability-value {
+  color: #fff;
+}
+
+.candidate-message {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  min-height: 1.9em;
+  padding: 0.3em 0.45em;
+  color: #c5cdc6;
+  font-size: 0.85em;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.candidate-error-message {
+  justify-content: space-between;
+  color: #edbbb2;
+}
+
+.candidate-error-message button {
+  flex: 0 0 auto;
+  padding: 0.1em 0.45em;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e4ebe2;
+  cursor: pointer;
+  font-size: 1em;
+}
+
+.candidate-error-message button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.candidate-notice-message {
+  color: #c5cdc6;
+}
+
+.loading-line {
+  flex: 0 0 auto;
+  width: 1.2em;
+  height: 2px;
+  border-radius: 2px;
+  background: #a8bda9;
+  animation: loadingLine 800ms ease-in-out infinite alternate;
+}
+
+/* 测量光标坐标用的镜像元素（不可见） */
+.caret-mirror {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  z-index: -1;
+  visibility: hidden;
+  white-space: pre-wrap;
+  pointer-events: none;
+}
+
+@keyframes candidateEnter {
+  from { opacity: 0; transform: translateY(-4px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes candidatePending {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes loadingLine {
+  from { opacity: 0.35; transform: scaleX(0.6); }
+  to { opacity: 1; transform: scaleX(1); }
+}
+
+
+/* ═══════ § E7. 文件提示条 ═══════
+   编辑区上方：打开 Word / 非 UTF-8 / 打开失败 / 光标在锚点之前。 */
+
+.file-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  margin: -28px 0 30px;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  font-size: calc(11px * var(--ui-scale));
+  line-height: 1.7;
+}
+
+.file-banner.is-error {
+  border-color: rgba(197, 119, 106, 0.4);
+  background: rgba(197, 119, 106, 0.1);
+  color: #b4675b;
+}
+
+.app-root[data-theme="dark"] .file-banner.is-error {
+  color: #e2a094;
+}
+
+.file-banner .link-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 光标在大纲锚点之前时，这是主编辑区里的明确上下文状态提示。 */
+.context-fallback-banner {
+  border-color: rgba(196, 154, 72, 0.36);
+  background: rgba(205, 160, 66, 0.12);
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+
+.app-root[data-theme="dark"] .context-fallback-banner {
+  border-color: rgba(214, 176, 100, 0.36);
+  background: rgba(216, 178, 100, 0.12);
+  color: var(--ink);
+}
+
+
+/* ═══════ § E8. Toast 弱提醒 ═══════ */
+
+.gentle-toast {
+  position: fixed;
+  bottom: 62px;
+  left: 50%;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 11px 13px 11px 17px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--popover-bg);
+  box-shadow: var(--popover-shadow);
+  transform: translateX(-50%);
+  animation: toastEnter 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+.toast-text {
+  color: var(--ink-soft);
+  font-size: calc(12px * var(--ui-scale));
+  line-height: 1.6;
+}
+
+.toast-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.toast-button {
+  min-height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+  white-space: nowrap;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.toast-button:hover {
+  color: var(--ink);
+}
+
+.toast-primary {
+  border-color: var(--accent-border);
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+@keyframes toastEnter {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+
+/* ═══════ § E9. 响应式 ═══════ */
+
+@media (max-width: 860px) {
+  .document-sheet {
+    width: min(100%, 850px);
+  }
+
+  .writing-column {
+    padding-right: clamp(22px, 6vw, 55px);
+    padding-left: clamp(22px, 6vw, 55px);
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    flex-basis: 58px;
+    padding-right: 12px;
+    padding-left: 13px;
+  }
+
+  .brand-area {
+    gap: 8px;
+  }
+
+  .brand-mark,
+  .brand-mark svg {
+    width: 25px;
+    height: 25px;
+  }
+
+  .brand-name {
+    font-size: 17px;
+  }
+
+  .brand-caption,
+  .topbar-divider,
+  .toolbar-divider,
+  .history-button {
+    display: none;
+  }
+
+  .toolbar {
+    gap: 1px;
+  }
+
+  .tool-button {
+    min-width: 34px;
+    width: 34px;
+    padding: 0;
+  }
+
+  .tool-button span,
+  .editor-back-button span {
+    display: none;
+  }
+
+  .workspace {
+    overflow: hidden;
+  }
+
+  .editor-stage {
+    padding: 14px 10px 28px;
+  }
+
+  .document-sheet {
+    min-height: calc(100vh - 128px);
+  }
+
+  .writing-column {
+    padding: 49px 22px 75px;
+  }
+
+  .document-heading {
+    margin-bottom: 28px;
+  }
+
+  .document-title {
+    font-size: 26px;
+  }
+
+  .writing-area {
+    height: max(430px, calc(100vh - 310px));
+    min-height: 430px;
+  }
+
+  .statusbar {
+    flex-basis: 43px;
+    grid-template-columns: auto 1fr auto;
+    gap: 9px;
+    padding: 0 13px;
+    font-size: 9px;
+  }
+
+  .statusbar-hint {
+    text-align: left;
+  }
+
+  .statusbar-right {
+    gap: 9px;
+  }
+
+  .demo-label {
+    padding-left: 8px;
+  }
+}

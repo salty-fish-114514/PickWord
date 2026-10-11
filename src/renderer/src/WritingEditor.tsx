@@ -32,6 +32,7 @@ import {
   estimatePrefillSeconds,
   sampleByProbability,
 } from "./lib/candidateProvider";
+import { diversifyCandidates } from "./lib/candidateDiversity";
 import { useBackendStatus } from "./lib/useBackendStatus";
 import {
   commonPrefixLength,
@@ -491,7 +492,13 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           sorted.filter((item) => !item.isEos && item.text.length > 0),
           s.softenTemperature,
         );
-        setCandidateList(usable);
+
+        // ── 多样化重排 ──
+        // 对软化后的候选做轻量多样化重排：降低纯标点/空格候选的排名，
+        // 惩罚与前排候选字面相似的项目，以及同首字扎堆。
+        // 不删除候选、不修改原始 prob/logit，windowSize 以外保持模型原始顺序。
+        const diversified = diversifyCandidates(usable);
+        setCandidateList(diversified);
         setGlobalIndex(0);
         setCandidateLoading(false);
 
