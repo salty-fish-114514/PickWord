@@ -19,11 +19,13 @@ interface LibraryHomeProps {
   loading: boolean;
   error: string | null;
   isDemo: boolean;
-  hasLegacyApi: boolean;
   /** 本地模型状态与加载进度，首页顶部也要显示（作者一进来就知道还要等多久）。 */
   backendStatus: BackendStatus;
   backendProgress: BackendProgress | null;
   backendIsDemo: boolean;
+  /** 后端实际生效的上下文长度（ModelProfile），给设置面板做说明。 */
+  backendContextLen?: number | null;
+  backendSlots?: number | null;
   onBackendRetry: () => void;
   onBackendLog: () => void;
   onRefresh: () => Promise<void>;
@@ -31,13 +33,73 @@ interface LibraryHomeProps {
   onCreate: () => Promise<void>;
   onRename: (id: string, title: string) => Promise<void>;
   onDelete: (ids: string[]) => Promise<void>;
+  /** 长篇：新建 / 追加一卷 / 改书名 / 短篇升级 / 单卷降回短篇。 */
+  onCreateBook: (title: string) => Promise<void>;
+  onCreateVolume: (bookId: string) => Promise<void>;
+  onRenameBook: (bookId: string, title: string) => Promise<void>;
+  onConvertToBook: (id: string) => Promise<void>;
+  onConvertToStandalone: (bookId: string) => Promise<void>;
   onImport: (files: File[]) => Promise<ImportReport>;
   onChooseDirectory: () => Promise<boolean>;
   onResetDirectory: () => Promise<void>;
   onSettingsChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onResetAdvanced: () => void;
-  /** 引导用户回到配置页重新设置模型（从设置面板或警告条触发） */
-  onReconfigure?: () => void;
+  /** 打开「模型与推理」面板（警告条与设置面板都从这里进）；演示模式下不传。 */
+  onOpenBackendSettings?: () => void;
+}
+
+/** 首页的一张卡片：独立短篇，或把同一部长篇的各卷归成一张。 */
+type LibraryItem =
+  | { kind: "doc"; key: string; entry: LibraryEntry }
+  | {
+      kind: "book";
+      key: string;
+      id: string;
+      title: string;
+      /** 按卷序号升序。 */
+      volumes: LibraryEntry[];
+      /** 最近交互的那一卷（点开卡片默认打开它）。 */
+      latest: LibraryEntry;
+      characterCount: number;
+      interactedAt: number;
+    };
+
+/** entries 已按最近交互排序；长篇按首次出现的位置占位，各卷归并。 */
+function groupEntries(entries: LibraryEntry[]): LibraryItem[] {
+  const items: LibraryItem[] = [];
+  const books = new Map<string, Extract<LibraryItem, { kind: "book" }>>();
+  for (const entry of entries) {
+    if (!entry.book) {
+      items.push({ kind: "doc", key: entry.id, entry });
+      continue;
+    }
+    let book = books.get(entry.book.id);
+    if (!book) {
+      book = {
+        kind: "book",
+        key: `book:${entry.book.id}`,
+        id: entry.book.id,
+        title: entry.book.title,
+        volumes: [],
+        latest: entry,
+        characterCount: 0,
+        interactedAt: entry.interactedAt,
+      };
+      books.set(entry.book.id, book);
+      items.push(book);
+    }
+    book.volumes.push(entry);
+    book.characterCount += entry.characterCount;
+    if (entry.interactedAt > book.latest.interactedAt) book.latest = entry;
+    book.interactedAt = Math.max(book.interactedAt, entry.interactedAt);
+  }
+  for (const book of books.values()) book.volumes.sort((a, b) => (a.book?.volume ?? 0) - (b.book?.volume ?? 0));
+  return items;
+}
+
+function volumeLabel(entry: LibraryEntry): string {
+  const n = (entry.book?.volume ?? 0) + 1;
+  return entry.title && entry.title !== `第${n}卷` ? `第${n}卷 · ${entry.title}` : `第${n}卷`;
 }
 
 /** 显示最后一次交互的时间。排序使用完整时间戳，文字只是给作者阅读。 */
@@ -62,10 +124,11 @@ export function LibraryHome({
   loading,
   error,
   isDemo,
-  hasLegacyApi,
   backendStatus,
   backendProgress,
   backendIsDemo,
+  backendContextLen = null,
+  backendSlots = null,
   onBackendRetry,
   onBackendLog,
   onRefresh,
@@ -73,19 +136,31 @@ export function LibraryHome({
   onCreate,
   onRename,
   onDelete,
+  onCreateBook,
+  onCreateVolume,
+  onRenameBook,
+  onConvertToBook,
+  onConvertToStandalone,
   onImport,
   onChooseDirectory,
   onResetDirectory,
   onSettingsChange,
   onResetAdvanced,
-  onReconfigure,
+  onOpenBackendSettings,
 }: LibraryHomeProps) {
   const [query, setQuery] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [menuId, setMenuId] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState<LibraryEntry | null>(null);
+  /** 通用的「输入一个名字」对话框：改名 / 改书名 / 新建长篇。 */
+  const [nameDialog, setNameDialog] = useState<{
+    eyebrow: string;
+    title: string;
+    description: string;
+    confirmLabel: string;
+    submit: (value: string) => Promise<void>;
+  } | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deleteIds, setDeleteIds] = useState<string[] | null>(null);
   const [working, setWorking] = useState(false);
@@ -95,13 +170,22 @@ export function LibraryHome({
   const searchRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
 
+  const items = useMemo(() => groupEntries(entries), [entries]);
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase("zh-CN");
-    if (!term) return entries;
-    return entries.filter((entry) =>
-      `${entry.title} ${entry.excerpt}`.toLocaleLowerCase("zh-CN").includes(term),
+    if (!term) return items;
+    const matches = (entry: LibraryEntry) => `${entry.title} ${entry.excerpt}`.toLocaleLowerCase("zh-CN").includes(term);
+    return items.filter((item) =>
+      item.kind === "doc"
+        ? matches(item.entry)
+        : item.title.toLocaleLowerCase("zh-CN").includes(term) || item.volumes.some(matches),
     );
-  }, [entries, query]);
+  }, [items, query]);
+  /** 当前结果里所有可选中的文稿 id（长篇展开为各卷）。 */
+  const filteredIds = useMemo(
+    () => filtered.flatMap((item) => (item.kind === "doc" ? [item.entry.id] : item.volumes.map((v) => v.id))),
+    [filtered],
+  );
 
   /** 首页快捷键只在首页挂载；进入编辑器后，编辑器会自行处理 Ctrl+F 和 Ctrl+S。 */
   useEffect(() => {
@@ -148,13 +232,17 @@ export function LibraryHome({
     }
   }
 
-  function toggleSelection(id: string) {
+  function toggleSelection(ids: string[]) {
     setSelected((previous) => {
       const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      const allIn = ids.every((id) => next.has(id));
+      ids.forEach((id) => (allIn ? next.delete(id) : next.add(id)));
       return next;
     });
+  }
+
+  function itemIds(item: LibraryItem): string[] {
+    return item.kind === "doc" ? [item.entry.id] : item.volumes.map((v) => v.id);
   }
 
   function exitSelection() {
@@ -165,21 +253,56 @@ export function LibraryHome({
   function startRename(entry: LibraryEntry) {
     setMenuId(null);
     setRenameValue(entry.title);
-    setRenaming(entry);
+    setNameDialog({
+      eyebrow: "文稿管理",
+      title: entry.book ? "修改卷标题" : "修改名称",
+      description: entry.book ? "只改这一卷的标题，文件名跟随书名。" : "文稿内容与上下文不会改变。",
+      confirmLabel: "保存名称",
+      submit: async (value) => {
+        await onRename(entry.id, value);
+        setFeedback({ kind: "success", message: "已改名，并移到最近交互的位置。" });
+      },
+    });
   }
 
-  async function confirmRename() {
-    const entry = renaming;
-    if (!entry) return;
-    const nextTitle = renameValue.trim();
-    if (!nextTitle) {
-      setFeedback({ kind: "error", message: "文稿名称不能为空。" });
+  function startRenameBook(book: Extract<LibraryItem, { kind: "book" }>) {
+    setMenuId(null);
+    setRenameValue(book.title);
+    setNameDialog({
+      eyebrow: "长篇管理",
+      title: "修改书名",
+      description: "整本书的文件夹与各卷文件会一起改名。",
+      confirmLabel: "保存书名",
+      submit: async (value) => {
+        await onRenameBook(book.id, value);
+        setFeedback({ kind: "success", message: "书名已修改。" });
+      },
+    });
+  }
+
+  function startCreateBook() {
+    setRenameValue("");
+    setNameDialog({
+      eyebrow: "新建长篇",
+      title: "给这部长篇起个名字",
+      description: "长篇以文件夹存放，可以分成多卷；风格参考、角色与设定由各卷共用。",
+      confirmLabel: "创建并开始写",
+      submit: (value) => onCreateBook(value),
+    });
+  }
+
+  async function confirmNameDialog() {
+    const dialog = nameDialog;
+    if (!dialog) return;
+    const value = renameValue.trim();
+    if (!value) {
+      setFeedback({ kind: "error", message: "名称不能为空。" });
       return;
     }
     await act(async () => {
-      await onRename(entry.id, nextTitle);
-      setRenaming(null);
-    }, "文稿已改名，并移到最近交互的位置。");
+      await dialog.submit(value);
+      setNameDialog(null);
+    });
   }
 
   async function confirmDelete() {
@@ -244,11 +367,11 @@ export function LibraryHome({
     event.preventDefault();
     dragDepthRef.current = 0;
     setDragging(false);
-    if (working || renaming || deleteIds) return;
+    if (working || nameDialog || deleteIds) return;
     void importFiles(Array.from(event.dataTransfer.files));
   }
 
-  const allVisibleSelected = filtered.length > 0 && filtered.every((entry) => selected.has(entry.id));
+  const allVisibleSelected = filteredIds.length > 0 && filteredIds.every((id) => selected.has(id));
 
   return (
     <div
@@ -311,7 +434,7 @@ export function LibraryHome({
       </div>
 
       {/* 模型不可用时显示警告条：引导用户回到配置页完成设置 */}
-      {!backendIsDemo && (backendStatus === "stopped" || backendStatus === "error") && onReconfigure && (
+      {!backendIsDemo && (backendStatus === "stopped" || backendStatus === "error") && onOpenBackendSettings && (
         <div className="library-model-warning" role="alert">
           <div className="library-model-warning-content">
             <Icon name="warning" size={18} />
@@ -324,8 +447,8 @@ export function LibraryHome({
               </span>
             </div>
           </div>
-          <button className="library-model-warning-action" type="button" onClick={onReconfigure}>
-            配置模型
+          <button className="library-model-warning-action" type="button" onClick={onOpenBackendSettings}>
+            模型与推理
           </button>
         </div>
       )}
@@ -357,18 +480,21 @@ export function LibraryHome({
                 >
                   {selecting ? "退出管理" : "批量管理"}
                 </button>
+                <button
+                  className="library-text-action"
+                  type="button"
+                  disabled={working || loading}
+                  title="分卷、分章的长篇：一个文件夹，多卷 txt"
+                  onClick={startCreateBook}
+                >
+                  新建长篇
+                </button>
                 <button className="library-primary-action" type="button" disabled={working || loading} onClick={() => void act(onCreate)}>
                   <Icon name="plus" size={18} />
                   新建文稿
                 </button>
               </div>
             </div>
-
-            {isDemo && hasLegacyApi && (
-              <div className="library-notice" role="status">
-                当前主进程尚未提供多篇文稿的按 ID 接口。这里是浏览器本地演示文库，不会修改原有单篇文稿或主进程的保存目标。接入步骤见 INTEGRATION.md。
-              </div>
-            )}
 
             {error && (
               <div className="library-message is-error" role="alert">
@@ -394,8 +520,8 @@ export function LibraryHome({
                   type="button"
                   onClick={() => setSelected((previous) => {
                     const next = new Set(previous);
-                    if (allVisibleSelected) filtered.forEach((entry) => next.delete(entry.id));
-                    else filtered.forEach((entry) => next.add(entry.id));
+                    if (allVisibleSelected) filteredIds.forEach((id) => next.delete(id));
+                    else filteredIds.forEach((id) => next.add(id));
                     return next;
                   })}
                 >
@@ -428,63 +554,135 @@ export function LibraryHome({
               </div>
             ) : (
               <div className="library-grid" role="list" aria-label="文稿列表">
-                {filtered.map((entry) => (
-                  <article className="manuscript-item" role="listitem" key={entry.id}>
-                    <div className={`manuscript-cover-frame ${selected.has(entry.id) ? "is-selected" : ""}`}>
-                      <button
-                        className="manuscript-cover"
-                        type="button"
-                        aria-label={selecting ? `选择${entry.title}` : `打开${entry.title}`}
-                        aria-pressed={selecting ? selected.has(entry.id) : undefined}
-                        onClick={() => selecting ? toggleSelection(entry.id) : void act(() => onOpen(entry.id))}
-                      >
-                        <span className={`manuscript-type is-${entry.sourceFormat}`}>
-                          {entry.sourceFormat.toUpperCase()}
-                        </span>
-                        <span className="manuscript-excerpt">{entry.excerpt || "在这里开始写作。"}</span>
-                        <span className="manuscript-watermark">{entry.characterCount.toLocaleString("zh-CN")} 字</span>
-                      </button>
-
-                      {selecting ? (
-                        <span className={`manuscript-check ${selected.has(entry.id) ? "is-checked" : ""}`} aria-hidden="true">
-                          {selected.has(entry.id) ? "✓" : ""}
-                        </span>
-                      ) : (
-                        <div className="manuscript-menu-area">
-                          <button
-                            className="manuscript-menu-trigger"
-                            type="button"
-                            aria-label={`${entry.title}的管理菜单`}
-                            aria-haspopup="menu"
-                            aria-expanded={menuId === entry.id}
-                            onClick={() => setMenuId((previous) => previous === entry.id ? null : entry.id)}
-                          >
-                            <Icon name="more" size={16} />
-                          </button>
-                          {menuId === entry.id && (
-                            <div className="manuscript-menu" role="menu">
-                              <button type="button" role="menuitem" onClick={() => startRename(entry)}>
-                                <Icon name="edit" size={15} />改名
-                              </button>
-                              <button
-                                className="is-danger"
-                                type="button"
-                                role="menuitem"
-                                onClick={() => { setMenuId(null); setDeleteIds([entry.id]); }}
-                              >
-                                <Icon name="trash" size={15} />删除
-                              </button>
-                            </div>
+                {filtered.map((item) => {
+                  const ids = itemIds(item);
+                  const isSelected = ids.every((id) => selected.has(id));
+                  const entry = item.kind === "doc" ? item.entry : item.latest;
+                  const title = item.kind === "doc" ? item.entry.title : item.title;
+                  const count = item.kind === "doc" ? item.entry.characterCount : item.characterCount;
+                  const menuOpen = menuId === item.key;
+                  return (
+                    <article className="manuscript-item" role="listitem" key={item.key}>
+                      <div className={`manuscript-cover-frame ${isSelected ? "is-selected" : ""} ${item.kind === "book" ? "is-book" : ""}`}>
+                        <button
+                          className="manuscript-cover"
+                          type="button"
+                          aria-label={selecting ? `选择${title}` : `打开${title}`}
+                          aria-pressed={selecting ? isSelected : undefined}
+                          onClick={() => selecting ? toggleSelection(ids) : void act(() => onOpen(entry.id))}
+                        >
+                          {item.kind === "book" ? (
+                            <span className="manuscript-type is-book">
+                              <Icon name="book" size={12} />
+                              长篇 · {item.volumes.length} 卷
+                            </span>
+                          ) : (
+                            <span className={`manuscript-type is-${entry.sourceFormat}`}>
+                              {entry.sourceFormat.toUpperCase()}
+                            </span>
                           )}
-                        </div>
-                      )}
-                    </div>
-                    <div className="manuscript-label">
-                      <span className="manuscript-title" title={entry.title}>{entry.title}</span>
-                      <span className="manuscript-date">{shortDate(entry.interactedAt)}</span>
-                    </div>
-                  </article>
-                ))}
+                          <span className="manuscript-excerpt">{entry.excerpt || "在这里开始写作。"}</span>
+                          <span className="manuscript-watermark">{count.toLocaleString("zh-CN")} 字</span>
+                        </button>
+
+                        {selecting ? (
+                          <span className={`manuscript-check ${isSelected ? "is-checked" : ""}`} aria-hidden="true">
+                            {isSelected ? "✓" : ""}
+                          </span>
+                        ) : (
+                          <div className="manuscript-menu-area">
+                            <button
+                              className="manuscript-menu-trigger"
+                              type="button"
+                              aria-label={`${title}的管理菜单`}
+                              aria-haspopup="menu"
+                              aria-expanded={menuOpen}
+                              onClick={() => setMenuId((previous) => previous === item.key ? null : item.key)}
+                            >
+                              <Icon name="more" size={16} />
+                            </button>
+                            {menuOpen && item.kind === "doc" && (
+                              <div className="manuscript-menu" role="menu">
+                                <button type="button" role="menuitem" onClick={() => startRename(item.entry)}>
+                                  <Icon name="edit" size={15} />改名
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  title="原稿成为第一卷，之后可以继续加卷"
+                                  onClick={() => { setMenuId(null); void act(() => onConvertToBook(item.entry.id), "已升级为长篇，原稿成为第一卷。"); }}
+                                >
+                                  <Icon name="book" size={15} />升级为长篇
+                                </button>
+                                <button
+                                  className="is-danger"
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() => { setMenuId(null); setDeleteIds([item.entry.id]); }}
+                                >
+                                  <Icon name="trash" size={15} />删除
+                                </button>
+                              </div>
+                            )}
+                            {menuOpen && item.kind === "book" && (
+                              <div className="manuscript-menu" role="menu">
+                                <div className="manuscript-menu-caption">各卷</div>
+                                {item.volumes.map((volume) => (
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    key={volume.id}
+                                    className="manuscript-menu-volume"
+                                    onClick={() => { setMenuId(null); void act(() => onOpen(volume.id)); }}
+                                  >
+                                    <span>{volumeLabel(volume)}</span>
+                                    <span className="manuscript-menu-meta">{volume.characterCount.toLocaleString("zh-CN")} 字</span>
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() => { setMenuId(null); void act(() => onCreateVolume(item.id), "已新建一卷。"); }}
+                                >
+                                  <Icon name="plus" size={15} />新建一卷
+                                </button>
+                                <button type="button" role="menuitem" onClick={() => startRenameBook(item)}>
+                                  <Icon name="edit" size={15} />改书名
+                                </button>
+                                {item.volumes.length === 1 && (
+                                  <button type="button" role="menuitem" onClick={() => startRename(item.volumes[0])}>
+                                    <Icon name="edit" size={15} />改卷标题
+                                  </button>
+                                )}
+                                {item.volumes.length === 1 && (
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() => { setMenuId(null); void act(() => onConvertToStandalone(item.id), "已降为短篇。"); }}
+                                  >
+                                    <Icon name="export" size={15} />降为短篇
+                                  </button>
+                                )}
+                                <button
+                                  className="is-danger"
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() => { setMenuId(null); setDeleteIds(ids); }}
+                                >
+                                  <Icon name="trash" size={15} />删除整本
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <div className="manuscript-label">
+                        <span className="manuscript-title" title={title}>{title}</span>
+                        <span className="manuscript-date">{shortDate(item.kind === "doc" ? item.entry.interactedAt : item.interactedAt)}</span>
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -504,7 +702,9 @@ export function LibraryHome({
             onChange={onSettingsChange}
             onResetAdvanced={onResetAdvanced}
             onClose={() => setSettingsOpen(false)}
-            onReconfigureModel={onReconfigure}
+            onOpenBackendSettings={onOpenBackendSettings}
+            detectedContextLen={backendContextLen}
+            detectedSlots={backendSlots}
           />
         )}
       </div>
@@ -525,32 +725,32 @@ export function LibraryHome({
         </div>
       )}
 
-      {renaming && (
+      {nameDialog && (
         <div className="library-dialog-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setRenaming(null);
+          if (event.target === event.currentTarget) setNameDialog(null);
         }}>
           <section className="library-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title">
-            <span className="library-dialog-eyebrow">文稿管理</span>
-            <h2 id="rename-title">修改名称</h2>
-            <p>文稿内容与上下文不会改变。</p>
+            <span className="library-dialog-eyebrow">{nameDialog.eyebrow}</span>
+            <h2 id="rename-title">{nameDialog.title}</h2>
+            <p>{nameDialog.description}</p>
             <input
               autoFocus
               className="library-dialog-input"
-              aria-label="新的文稿名称"
+              aria-label="名称"
               value={renameValue}
               maxLength={80}
               onChange={(event) => setRenameValue(event.target.value)}
               onKeyDown={(event) => {
                 if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-                if (event.key === "Enter") void confirmRename();
-                if (event.key === "Escape") setRenaming(null);
+                if (event.key === "Enter") void confirmNameDialog();
+                if (event.key === "Escape") setNameDialog(null);
               }}
             />
             {feedback?.kind === "error" && <p className="library-dialog-error" role="alert">{feedback.message}</p>}
             <div className="library-dialog-actions">
-              <button type="button" onClick={() => setRenaming(null)}>取消</button>
-              <button className="is-primary" type="button" disabled={working || !renameValue.trim()} onClick={() => void confirmRename()}>
-                保存名称
+              <button type="button" onClick={() => setNameDialog(null)}>取消</button>
+              <button className="is-primary" type="button" disabled={working || !renameValue.trim()} onClick={() => void confirmNameDialog()}>
+                {nameDialog.confirmLabel}
               </button>
             </div>
           </section>

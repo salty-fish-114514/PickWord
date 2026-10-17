@@ -3,8 +3,7 @@
  *
  * 设计要点：
  *   ● 全部在 renderer 里解析，**零第三方依赖**。浏览器演示和 Electron 共用同一份代码：
- *       浏览器：<input type="file"> 读到 ArrayBuffer；
- *       Electron：主进程弹对话框、读文件，把字节通过 window.api.openDocument 交给这里。
+ *       浏览器与 Electron 都用 <input type="file"> / 拖拽拿到 File → ArrayBuffer，再交给这里解析。
  *   ● Word 兼容是「只读」的：只提取段落文字，不碰格式、图片、表格样式；
  *     保存永远只写 txt，不会也不可能修改原 .docx。
  *   ● 旧版 .doc（二进制格式）不支持：它不是 zip，解析成本极高，让用户另存为 .docx / .txt。

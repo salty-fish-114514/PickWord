@@ -1,13 +1,14 @@
 /**
  * 多篇文稿的数据适配层。UI 只调用 LibraryProvider，不直接拼文件路径。
  *
- * 已有 documents.ts 使用单个全局 currentPath，不能安全地用旧 saveDocument(id-less)
- * 来保存多篇文稿：打开 A 后切到 B 时，较晚完成的自动保存可能写错目标。
- * 因此真实文库必须由主进程提供按稳定 id 操作的一组新接口；接口不完整时，
- * 整个文库回退到浏览器 localStorage 演示，不调用旧 saveDocument，也不改其 currentPath。
+ * Electron 下由主进程按稳定 id 操作（src/main/library.ts）；
+ * 浏览器演示模式下整个文库退回 localStorage。
  */
 
-import type { DocumentPayload, LibraryDirectory, LibraryEntry, LibraryFormat } from "./types";
+import { EMPTY_MATERIALS, type Materials } from "../../../shared/materials";
+import { countChars, makeExcerpt } from "../../../shared/text";
+import { platform } from "./platform";
+import type { BookRef, DocumentPayload, LibraryDirectory, LibraryEntry, LibraryFormat } from "./types";
 
 export interface LibraryProvider {
   readonly isDemo: boolean;
@@ -18,9 +19,31 @@ export interface LibraryProvider {
   rename(id: string, title: string): Promise<LibraryEntry>;
   remove(ids: string[]): Promise<void>;
   touch(id: string): Promise<LibraryEntry>;
+  /** 长篇：新建（返回第一卷）/ 追加一卷 / 改书名 / 短篇升级 / 单卷降回短篇。 */
+  createBook(title: string): Promise<LibraryEntry>;
+  createVolume(bookId: string): Promise<LibraryEntry>;
+  renameBook(bookId: string, title: string): Promise<void>;
+  convertToBook(id: string): Promise<LibraryEntry>;
+  convertToStandalone(bookId: string): Promise<LibraryEntry>;
   getDirectory(): Promise<LibraryDirectory>;
   chooseDirectory(): Promise<LibraryDirectory | null>;
   resetDirectory(): Promise<LibraryDirectory>;
+}
+
+/** 空文稿（新建 / 导入时的起点）。 */
+export function emptyDocument(title: string, content = ""): DocumentPayload {
+  return {
+    title,
+    content,
+    styleText: "",
+    outlineText: "",
+    styleEnabled: false,
+    outlineEnabled: true,
+    outlineSegments: [],
+    anchor: null,
+    chapterOutlines: {},
+    materials: EMPTY_MATERIALS,
+  };
 }
 
 interface MockRecord {
@@ -28,27 +51,45 @@ interface MockRecord {
   document: DocumentPayload;
 }
 
+/** 演示文库里的一部长篇：风格与素材由各卷共用（与主进程 book.json 的职责一致）。 */
+interface MockBook {
+  id: string;
+  title: string;
+  styleText: string;
+  styleEnabled: boolean;
+  materials: Materials;
+}
+
 interface MockStore {
   records: MockRecord[];
+  books?: MockBook[];
   directory: LibraryDirectory;
 }
 
 const LIBRARY_KEY = "zixia-library-v1";
 const LEGACY_DOCUMENT_KEYS = ["zixia-writing-document-v3", "zixia-writing-document-v2", "zixia-writing-document-v1"];
-const DEMO_DIRECTORY: LibraryDirectory = { path: "项目目录 / manuscripts（浏览器演示）", isDefault: true };
+const DEMO_DIRECTORY: LibraryDirectory = { path: "浏览器本地存储（演示模式）", isDefault: true };
 let memoryStore: MockStore | null = null;
 
 /** 文库摘要不带整篇正文，避免首页为每张封面渲染大字符串。 */
-function toEntry(id: string, document: DocumentPayload, sourceFormat: LibraryFormat, time: number): LibraryEntry {
-  return {
+function toEntry(
+  id: string,
+  document: DocumentPayload,
+  sourceFormat: LibraryFormat,
+  time: number,
+  book?: BookRef,
+): LibraryEntry {
+  const entry: LibraryEntry = {
     id,
     title: document.title.trim() || "未命名文稿",
-    excerpt: document.content.replace(/\s+/g, " ").trim().slice(0, 160),
+    excerpt: makeExcerpt(document.content),
     sourceFormat,
-    characterCount: Array.from(document.content.replace(/\s/g, "")).length,
+    characterCount: countChars(document.content),
     updatedAt: time,
     interactedAt: time,
   };
+  if (book) entry.book = { ...book };
+  return entry;
 }
 
 /** 旧版单篇演示稿只作为一篇导入新文库，原 localStorage 数据不会删除。 */
@@ -69,8 +110,7 @@ function legacyDocument(): DocumentPayload | null {
           ? (anchor as { offset: number; fingerprint: string })
           : null;
       return {
-        title: typeof record.title === "string" ? record.title : "上次文稿",
-        content: record.content,
+        ...emptyDocument(typeof record.title === "string" ? record.title : "上次文稿", record.content),
         styleText: typeof record.styleText === "string" ? record.styleText : "",
         outlineText: typeof record.outlineText === "string" ? record.outlineText : "",
         styleEnabled: record.styleEnabled === true,
@@ -126,17 +166,7 @@ function seedStore(): MockStore {
   return {
     directory: DEMO_DIRECTORY,
     records: samples.map((sample, index) => {
-      const document = index === 0 && legacy
-        ? legacy
-        : {
-            title: sample.title,
-            content: sample.content,
-            styleText: "",
-            outlineText: "",
-            styleEnabled: false,
-            outlineEnabled: false,
-            anchor: null,
-          };
+      const document = index === 0 && legacy ? legacy : emptyDocument(sample.title, sample.content);
       const id = crypto.randomUUID();
       const time = now - index * 86_400_000;
       return { document, entry: toEntry(id, document, sample.format, time) };
@@ -202,9 +232,25 @@ function findRecord(id: string): MockRecord {
   return record;
 }
 
+function findBook(bookId: string | undefined): MockBook | null {
+  if (!bookId) return null;
+  return (loadStore().books ?? []).find((book) => book.id === bookId) ?? null;
+}
+
+function uniqueBookTitle(requested: string, store: MockStore, excludeId?: string): string {
+  const title = requested.trim() || "未命名长篇";
+  const used = new Set((store.books ?? []).filter((b) => b.id !== excludeId).map((b) => b.title.toLocaleLowerCase()));
+  if (!used.has(title.toLocaleLowerCase())) return title;
+  let index = 2;
+  while (used.has(`${title} (${index})`.toLocaleLowerCase())) index += 1;
+  return `${title} (${index})`;
+}
+
 function uniqueTitle(requested: string, records: MockRecord[], excludeId?: string): string {
   const title = requested.trim() || "未命名文稿";
-  const used = new Set(records.filter((item) => item.entry.id !== excludeId).map((item) => item.entry.title.toLocaleLowerCase()));
+  const used = new Set(
+    records.filter((item) => item.entry.id !== excludeId && !item.entry.book).map((item) => item.entry.title.toLocaleLowerCase()),
+  );
   if (!used.has(title.toLocaleLowerCase())) return title;
   let index = 2;
   while (used.has(`${title} (${index})`.toLocaleLowerCase())) index += 1;
@@ -218,8 +264,18 @@ const mockLibraryProvider: LibraryProvider = {
     return loadStore().records.map((item) => ({ ...item.entry }));
   },
   async read(id) {
-    const document = findRecord(id).document;
-    return { ...document, anchor: document.anchor ? { ...document.anchor } : null };
+    const record = findRecord(id);
+    const book = findBook(record.entry.book?.id);
+    const document = record.document;
+    return {
+      ...document,
+      anchor: document.anchor ? { ...document.anchor } : null,
+      chapterOutlines: { ...(document.chapterOutlines ?? {}) },
+      outlineSegments: document.outlineSegments?.map((segment) => ({ ...segment, anchor: { ...segment.anchor } })),
+      ...(book
+        ? { styleText: book.styleText, styleEnabled: book.styleEnabled, materials: book.materials }
+        : { materials: document.materials ?? EMPTY_MATERIALS }),
+    };
   },
   async create(input, format) {
     const store = loadStore();
@@ -231,19 +287,30 @@ const mockLibraryProvider: LibraryProvider = {
   async save(id, input) {
     const store = loadStore();
     const current = findRecord(id);
-    const document = { ...input, title: uniqueTitle(input.title, store.records, id) };
-    const entry = {
-      ...toEntry(id, document, current.entry.sourceFormat, nextInteraction(store.records)),
-    };
-    publish({ ...store, records: store.records.map((item) => item.entry.id === id ? { entry, document } : item) });
+    const bookRef = current.entry.book;
+    const title = bookRef ? input.title.trim() || current.entry.title : uniqueTitle(input.title, store.records, id);
+    // 卷：风格与素材写回书，旁车里不重复保存
+    const document = bookRef
+      ? { ...input, title, styleText: "", styleEnabled: false, materials: EMPTY_MATERIALS }
+      : { ...input, title };
+    const entry = toEntry(id, document, current.entry.sourceFormat, nextInteraction(store.records), bookRef);
+    const books = bookRef
+      ? (store.books ?? []).map((book) =>
+          book.id === bookRef.id
+            ? { ...book, styleText: input.styleText, styleEnabled: input.styleEnabled, materials: input.materials ?? EMPTY_MATERIALS }
+            : book,
+        )
+      : store.books;
+    publish({ ...store, books, records: store.records.map((item) => item.entry.id === id ? { entry, document } : item) });
     return { ...entry };
   },
   async rename(id, title) {
     if (!title.trim()) throw new Error("文稿标题不能为空。");
     const store = loadStore();
     const current = findRecord(id);
-    const document = { ...current.document, title: uniqueTitle(title, store.records, id) };
-    const entry = toEntry(id, document, current.entry.sourceFormat, nextInteraction(store.records));
+    const bookRef = current.entry.book;
+    const document = { ...current.document, title: bookRef ? title.trim() : uniqueTitle(title, store.records, id) };
+    const entry = toEntry(id, document, current.entry.sourceFormat, nextInteraction(store.records), bookRef);
     publish({ ...store, records: store.records.map((item) => item.entry.id === id ? { entry, document } : item) });
     return { ...entry };
   },
@@ -253,7 +320,104 @@ const mockLibraryProvider: LibraryProvider = {
       throw new Error("部分文稿已不存在，请刷新文库后重试。");
     }
     const deleting = new Set(ids);
-    publish({ ...store, records: store.records.filter((item) => !deleting.has(item.entry.id)) });
+    const records = store.records.filter((item) => !deleting.has(item.entry.id));
+    // 一卷不剩的长篇连同书一起删除
+    const books = (store.books ?? []).filter((book) => records.some((item) => item.entry.book?.id === book.id));
+    publish({ ...store, books, records });
+  },
+  async createBook(title) {
+    const store = loadStore();
+    const book: MockBook = {
+      id: crypto.randomUUID(),
+      title: uniqueBookTitle(title, store),
+      styleText: "",
+      styleEnabled: false,
+      materials: EMPTY_MATERIALS,
+    };
+    const document = emptyDocument("第1卷");
+    const entry = toEntry(crypto.randomUUID(), document, "txt", nextInteraction(store.records), {
+      id: book.id,
+      title: book.title,
+      volume: 0,
+    });
+    publish({ ...store, books: [...(store.books ?? []), book], records: [...store.records, { entry, document }] });
+    return { ...entry };
+  },
+  async createVolume(bookId) {
+    const store = loadStore();
+    const book = findBook(bookId);
+    if (!book) throw new Error("这部长篇已经不存在，请返回首页刷新文库。");
+    const volumes = store.records.filter((item) => item.entry.book?.id === bookId).map((item) => item.entry.book?.volume ?? 0);
+    const volume = volumes.length === 0 ? 0 : Math.max(...volumes) + 1;
+    const document = emptyDocument(`第${volume + 1}卷`);
+    const entry = toEntry(crypto.randomUUID(), document, "txt", nextInteraction(store.records), {
+      id: book.id,
+      title: book.title,
+      volume,
+    });
+    publish({ ...store, records: [...store.records, { entry, document }] });
+    return { ...entry };
+  },
+  async renameBook(bookId, title) {
+    if (!title.trim()) throw new Error("书名不能为空。");
+    const store = loadStore();
+    if (!findBook(bookId)) throw new Error("这部长篇已经不存在，请返回首页刷新文库。");
+    const nextTitle = uniqueBookTitle(title, store, bookId);
+    publish({
+      ...store,
+      books: (store.books ?? []).map((book) => book.id === bookId ? { ...book, title: nextTitle } : book),
+      records: store.records.map((item) =>
+        item.entry.book?.id === bookId
+          ? { ...item, entry: { ...item.entry, book: { ...item.entry.book, title: nextTitle } } }
+          : item,
+      ),
+    });
+  },
+  async convertToBook(id) {
+    const store = loadStore();
+    const current = findRecord(id);
+    if (current.entry.book) throw new Error("这篇文稿已经是长篇的一卷。");
+    const book: MockBook = {
+      id: crypto.randomUUID(),
+      title: uniqueBookTitle(current.entry.title, store),
+      styleText: current.document.styleText,
+      styleEnabled: current.document.styleEnabled,
+      materials: current.document.materials ?? EMPTY_MATERIALS,
+    };
+    const document = { ...current.document, title: "第1卷", styleText: "", styleEnabled: false, materials: EMPTY_MATERIALS };
+    const entry = toEntry(id, document, current.entry.sourceFormat, nextInteraction(store.records), {
+      id: book.id,
+      title: book.title,
+      volume: 0,
+    });
+    publish({
+      ...store,
+      books: [...(store.books ?? []), book],
+      records: store.records.map((item) => item.entry.id === id ? { entry, document } : item),
+    });
+    return { ...entry };
+  },
+  async convertToStandalone(bookId) {
+    const store = loadStore();
+    const book = findBook(bookId);
+    if (!book) throw new Error("这部长篇已经不存在，请返回首页刷新文库。");
+    const volumes = store.records.filter((item) => item.entry.book?.id === bookId);
+    if (volumes.length !== 1) throw new Error("只有单卷的长篇才能降回短篇。");
+    const only = volumes[0];
+    const document = {
+      ...only.document,
+      title: uniqueTitle(book.title, store.records, only.entry.id),
+      styleText: book.styleText,
+      styleEnabled: book.styleEnabled,
+      materials: book.materials,
+    };
+    const entry = toEntry(only.entry.id, document, only.entry.sourceFormat, nextInteraction(store.records));
+    publish({
+      ...store,
+      books: (store.books ?? []).filter((item) => item.id !== bookId),
+      records: store.records.map((item) => item.entry.id === only.entry.id ? { entry, document } : item),
+    });
+    return { ...entry };
   },
   async touch(id) {
     const store = loadStore();
@@ -293,28 +457,28 @@ const mockLibraryProvider: LibraryProvider = {
   },
 };
 
-/** 只有全部按 id 的文库接口可用才选择真实模式，避免新旧保存目标混用。 */
+/** Electron 下走主进程文库；浏览器演示走 localStorage。 */
 export function chooseLibraryProvider(): LibraryProvider {
-  const api = typeof window === "undefined" ? undefined : window.api;
+  const api = platform.api;
   if (!api) return mockLibraryProvider;
-
-  const {
-    listLibraryDocuments: list,
-    readLibraryDocument: read,
-    createLibraryDocument: create,
-    saveLibraryDocument: save,
-    renameLibraryDocument: rename,
-    deleteLibraryDocuments: remove,
-    touchLibraryDocument: touch,
-    getLibraryDirectory: getDirectory,
-    chooseLibraryDirectory: chooseDirectory,
-    resetLibraryDirectory: resetDirectory,
-  } = api;
-
-  if (list && read && create && save && rename && remove && touch && getDirectory && chooseDirectory && resetDirectory) {
-    return { isDemo: false, list, read, create, save, rename, remove, touch, getDirectory, chooseDirectory, resetDirectory };
-  }
-  return mockLibraryProvider;
+  return {
+    isDemo: false,
+    list: api.listLibraryDocuments,
+    read: api.readLibraryDocument,
+    create: api.createLibraryDocument,
+    save: api.saveLibraryDocument,
+    rename: api.renameLibraryDocument,
+    remove: api.deleteLibraryDocuments,
+    touch: api.touchLibraryDocument,
+    createBook: api.createLibraryBook,
+    createVolume: api.createLibraryVolume,
+    renameBook: api.renameLibraryBook,
+    convertToBook: api.convertLibraryToBook,
+    convertToStandalone: api.convertLibraryToStandalone,
+    getDirectory: api.getLibraryDirectory,
+    chooseDirectory: api.chooseLibraryDirectory,
+    resetDirectory: api.resetLibraryDirectory,
+  };
 }
 
 export function sortLibrary(entries: LibraryEntry[]): LibraryEntry[] {

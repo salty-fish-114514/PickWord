@@ -26,6 +26,12 @@
  * 与 UI 解耦后，你可以直接在 Node 里 import 它写单元测试。
  */
 
+import { CHATML_TEMPLATE, type PromptTemplate } from "../../../shared/modelProfile";
+import type { PromptMode } from "../../../shared/ipc";
+import { stripChapterMarks } from "./chapters";
+
+export type { PromptMode };
+
 /** 无锚点时正文窗口的默认上限（字符数）。Qwen 小模型 + 本地推理，10000~15000 是合理区间。 */
 export const DEFAULT_MAX_BODY_LEN = 12000;
 
@@ -48,8 +54,7 @@ export const OUTPUT_RESERVE_TOKENS = 256;
 /** 无论风格/大纲多长，正文预算至少保留这么多字，避免出现 0 或负数。 */
 const MIN_BODY_BUDGET = 1000;
 
-/** 四种拼接模式。plain = 纯续写（不套 ChatML），最像输入法。 */
-export type PromptMode = "plain" | "outline" | "style" | "full";
+/* 四种拼接模式 PromptMode 定义在 shared/ipc.ts（主进程校验请求时也要用）。 */
 
 /** 滑动窗口的可变状态，由 App 持有，每次编辑后交给本模块更新。 */
 export interface SlidingWindowState {
@@ -64,6 +69,8 @@ export interface BuildPromptArgs {
   styleText?: string;
   /** 已开启且非空的大纲文本；未开启传 undefined。 */
   outlineText?: string;
+  /** 命中的角色 / 设定卡片文本（见 lib/materials.ts）；没有传 undefined。 */
+  materialsText?: string;
   /** 编辑器全文。 */
   docText: string;
   /** 光标位置（字符偏移）。 */
@@ -78,6 +85,8 @@ export interface BuildPromptArgs {
   anchorWarnLen?: number;
   /** 模型上下文长度（token），缺省用 DEFAULT_MODEL_CONTEXT_LEN。 */
   modelContextLen?: number;
+  /** 对话模板（来自 ModelProfile），缺省 ChatML。 */
+  template?: PromptTemplate;
 }
 
 export interface BuiltPrompt {
@@ -121,75 +130,84 @@ function normalize(text: string | undefined): string | undefined {
 /**
  * 拼接核心：给定（已归一化的）风格 / 大纲 / 正文，返回 prompt 与模式。
  *
- * 模式 A（都不开）：直接返回正文，不套任何 ChatML 标签 —— KV cache 最干净。
- * 模式 B/C/D：按 Qwen ChatML 格式拼装，assistant 段以「正文：」结尾，让模型直接接着写。
+ * 四种模式只是 system 文案与 assistant 段开头不同；对话标记来自 template（ChatML / Gemma / Llama3），
+ * 由主进程按模型推断后随 ModelProfile 下发。assistant 段以「正文：」结尾，让模型直接接着写。
  * 风格文本在 system 段最前面且不变，前缀缓存必然命中，所以它可以很长。
  */
 function assemble(
   style: string | undefined,
   outline: string | undefined,
   body: string,
+  template: PromptTemplate = CHATML_TEMPLATE,
+  materials?: string,
 ): { prompt: string; mode: PromptMode } {
-
-
+  let mode: PromptMode;
+  let systemText: string;
   if (!style && !outline) {
-    return {
-      mode: "plain",
-      prompt:
-        `<|im_start|>system\n${SYSTEM_PLAIN}<|im_end|>\n` +
-        `<|im_start|>user\n请开始写作。<|im_end|>\n` +
-        `<|im_start|>assistant\n正文：\n${body}`,
-    };
+    mode = "plain";
+    systemText = SYSTEM_PLAIN;
+  } else if (outline && !style) {
+    mode = "outline";
+    systemText = SYSTEM_OUTLINE;
+  } else if (style && !outline) {
+    mode = "style";
+    systemText = `${SYSTEM_STYLE}\n${style}`;
+  } else {
+    mode = "full";
+    systemText = `${SYSTEM_FULL}\n${style}`;
   }
-
-  if (outline && !style) {
-    return {
-      mode: "outline",
-      prompt:
-        `<|im_start|>system\n${SYSTEM_OUTLINE}<|im_end|>\n` +
-        `<|im_start|>user\n请开始写作。<|im_end|>\n` +
-        `<|im_start|>assistant\n大纲：\n${outline}\n\n正文：\n${body}`,
-    };
-  }
-
-  if (style && !outline) {
-    return {
-      mode: "style",
-      prompt:
-        `<|im_start|>system\n${SYSTEM_STYLE}\n${style}<|im_end|>\n` +
-        `<|im_start|>user\n请开始写作。<|im_end|>\n` +
-        `<|im_start|>assistant\n正文：\n${body}`,
-    };
-  }
-
-  return {
-    mode: "full",
-    prompt:
-      `<|im_start|>system\n${SYSTEM_FULL}\n${style}<|im_end|>\n` +
-      `<|im_start|>user\n请开始写作。<|im_end|>\n` +
-      `<|im_start|>assistant\n大纲：\n${outline}\n\n正文：\n${body}`,
-  };
+  // 人物与设定放在大纲之前：它们比大纲更稳定（命中集合是黏性的），变化时尽量少波及后面的缓存。
+  const materialsBlock = materials ? `人物与设定：\n${materials}\n\n` : "";
+  const outlineBlock = outline ? `大纲：\n${outline}\n\n` : "";
+  const assistantText = `${materialsBlock}${outlineBlock}正文：\n${body}`;
+  const prompt =
+    template.systemOpen +
+    systemText +
+    template.systemClose +
+    template.userOpen +
+    "请开始写作。" +
+    template.userClose +
+    template.assistantOpen +
+    assistantText;
+  return { mode, prompt };
 }
 
 /* ════════════════════════════════════════════════════════════════
    二、硬上限
    ════════════════════════════════════════════════════════════════ */
 
-/** 风格 / 大纲 / 模板本身占用的字符数（= 正文为空时的 prompt 长度）。 */
-export function promptOverheadChars(style?: string, outline?: string): number {
-  return assemble(normalize(style), normalize(outline), "").prompt.length;
+/** 风格 / 大纲 / 素材 / 模板本身占用的字符数（= 正文为空时的 prompt 长度）。 */
+export function promptOverheadChars(
+  style?: string,
+  outline?: string,
+  template?: PromptTemplate,
+  materials?: string,
+): number {
+  return assemble(normalize(style), normalize(outline), "", template, normalize(materials)).prompt.length;
 }
 
 /** 正文硬上限（字符数）。 */
-export function bodyHardLimit(modelContextLen: number, style?: string, outline?: string): number {
+export function bodyHardLimit(
+  modelContextLen: number,
+  style?: string,
+  outline?: string,
+  template?: PromptTemplate,
+  materials?: string,
+): number {
   return Math.max(
     MIN_BODY_BUDGET,
-    modelContextLen - OUTPUT_RESERVE_TOKENS - promptOverheadChars(style, outline),
+    modelContextLen - OUTPUT_RESERVE_TOKENS - promptOverheadChars(style, outline, template, materials),
   );
 }
 
-function hardLimitFor(args: BuildPromptArgs): number {
-  return bodyHardLimit(args.modelContextLen ?? DEFAULT_MODEL_CONTEXT_LEN, args.styleText, args.outlineText);
+export function hardLimitFor(args: BuildPromptArgs): number {
+  return bodyHardLimit(
+    args.modelContextLen ?? DEFAULT_MODEL_CONTEXT_LEN,
+    args.styleText,
+    args.outlineText,
+    args.template,
+    args.materialsText,
+  );
 }
 
 /** 滑动窗口自己的上限：只读滑窗设置，不套用锚点模式的正文硬上限。 */
@@ -328,8 +346,8 @@ function resolveBodyRange(
       const length = cursor - safeAnchor;
       if (length > warnLen) {
         notices.push(
-          `本章正文已有 ${length} 字，超过建议的 ${warnLen} 字（硬上限约 ${hardLimitFor(args)} 字，超过后会自动退出锚点模式）。` +
-            "锚点模式不会自动截断，过长会让每次预测变慢；可考虑在合适处收束本章，并把锚点重设到下一章起点。",
+          `这一段大纲对应的正文已有 ${length} 字，超过建议的 ${warnLen} 字（硬上限约 ${hardLimitFor(args)} 字，超过后退回滑窗）。` +
+            "段起点到光标之间不会截断，过长会让每次预测变慢；可考虑在合适处新起一段大纲。",
         );
       }
       return { start: safeAnchor, anchored: true, notices };
@@ -337,7 +355,7 @@ function resolveBodyRange(
   }
 
   if (useOutline && (anchor === null || anchor === undefined)) {
-    notices.push("尚未锚定本章起点，已自动参考光标前最近的文字。若大纲与这段正文不匹配，辅助效果会变差。");
+    notices.push("这一段大纲对应的正文超过了硬上限，本次改用光标前最近的文字（大纲照常注入）。");
   }
 
   // ── 滑动窗口模式 ──
@@ -374,9 +392,10 @@ export function buildPrompt(args: BuildPromptArgs): BuiltPrompt {
   const { start, anchored, notices } = resolveBodyRange(args, Boolean(outline));
   const bodyEnd = Math.max(0, Math.min(args.cursorOffset, args.docText.length));
   const bodyStart = Math.min(Math.max(0, start), bodyEnd);
-  const body = args.docText.slice(bodyStart, bodyEnd);
+  // 章节标记行 `--标题--` 只对编辑器有意义，送给模型时还原成普通的标题行。
+  const body = stripChapterMarks(args.docText.slice(bodyStart, bodyEnd));
 
-  const { prompt, mode } = assemble(style, outline, body);
+  const { prompt, mode } = assemble(style, outline, body, args.template, normalize(args.materialsText));
   return {
     prompt,
     mode,

@@ -1,31 +1,89 @@
 /**
- * 订阅本地模型的状态与加载进度。
+ * 订阅本地模型的状态、加载进度与模型画像。
  *
  * 首页和编辑器都需要同一份信息，所以抽成一个 hook：
- *   - 真实环境：订阅 window.api 的 onBackendStatus / onBackendProgress；
+ *   - Electron：订阅 preload 的 onBackendStatus / onBackendProgress，就绪后再取一次 ModelProfile；
  *   - 浏览器演示：跑一段假的加载动画，然后置为就绪。
  *
  * 模块级缓存：首页 → 编辑器 → 首页来回切换时，不要每次都从 0% 重新播放演示进度，
  * 也不要让真实环境的订阅丢掉「已就绪」这个事实。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 import { simulateBackendProgress } from "./candidateProvider";
-import type { BackendProgress, BackendStatus } from "./types";
+import { platform } from "./platform";
+import type { BackendProgress, BackendStatus, ModelProfile } from "./types";
 
 interface BackendSnapshot {
   status: BackendStatus;
   progress: BackendProgress | null;
+  /** 后端就绪后由主进程给出：上下文长度、提示词模板、终止符。未就绪 / 演示模式为 null。 */
+  profile: ModelProfile | null;
 }
 
-let cached: BackendSnapshot | null = null;
-let demoStarted = false;
-const listeners = new Set<(snapshot: BackendSnapshot) => void>();
+const INITIAL: BackendSnapshot = { status: "loading", progress: null, profile: null };
 
-function publish(snapshot: BackendSnapshot) {
-  cached = snapshot;
-  listeners.forEach((listener) => listener(snapshot));
+let cached: BackendSnapshot = INITIAL;
+let demoStarted = false;
+let subscribers = 0;
+let unsubscribeApi: (() => void) | null = null;
+const listeners = new Set<() => void>();
+
+function publish(patch: Partial<BackendSnapshot>) {
+  cached = { ...cached, ...patch };
+  listeners.forEach((listener) => listener());
+}
+
+function getSnapshot(): BackendSnapshot {
+  return cached;
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** 就绪后拉取模型画像；失败不致命（编辑器会退回默认模板 / 设置里的上下文长度）。 */
+function fetchProfile() {
+  const api = platform.api;
+  if (!api) return;
+  void api
+    .getModelProfile()
+    .then((profile) => {
+      if (cached.status === "ready") publish({ profile });
+    })
+    .catch(() => undefined);
+}
+
+/** 进程内只订阅一次 preload 推送；组件各自订阅模块级缓存。 */
+function ensureApiSubscription() {
+  const api = platform.api;
+  if (!api || unsubscribeApi) return;
+  const unsubStatus = api.onBackendStatus((status) => {
+    publish({ status, ...(status === "ready" ? {} : { profile: null }) });
+    if (status === "ready") fetchProfile();
+  });
+  const unsubProgress = api.onBackendProgress((progress) => publish({ progress }));
+  unsubscribeApi = () => {
+    unsubStatus();
+    unsubProgress();
+    unsubscribeApi = null;
+  };
+
+  void api
+    .getBackendStatus()
+    .then((status) => {
+      publish({ status });
+      if (status === "ready") fetchProfile();
+    })
+    .catch(() => publish({ status: "error" }));
+  void api
+    .getBackendProgress()
+    .then((progress) => {
+      if (progress) publish({ progress });
+    })
+    .catch(() => undefined);
 }
 
 export function useBackendStatus(isDemo: boolean): BackendSnapshot & {
@@ -33,86 +91,49 @@ export function useBackendStatus(isDemo: boolean): BackendSnapshot & {
   retry: () => void;
   openLog: () => Promise<string | null>;
 } {
-  const [snapshot, setSnapshot] = useState<BackendSnapshot>(
-    () => cached ?? { status: isDemo ? "loading" : "loading", progress: null },
-  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot);
 
+  // 数据源的生命周期：第一个订阅者启动（演示动画 / preload 订阅），最后一个离开时才退订 preload。
   useEffect(() => {
-    listeners.add(setSnapshot);
-    if (cached) setSnapshot(cached);
-
-    let cleanup: (() => void) | undefined;
+    subscribers += 1;
 
     if (isDemo) {
       if (!demoStarted) {
         demoStarted = true;
-        cleanup = simulateBackendProgress(
-          (progress) => publish({ status: "loading", progress }),
-          () => publish({ status: "ready", progress: cached?.progress ?? null }),
-        );
         // 演示进度不随组件卸载而中断，否则切页会卡在中途。
-        cleanup = undefined;
+        simulateBackendProgress(
+          (progress) => publish({ status: "loading", progress }),
+          () => publish({ status: "ready" }),
+        );
       }
     } else {
-      const api = window.api;
-      const unsubStatus = api?.onBackendStatus?.((status) => {
-        publish({ status, progress: cached?.progress ?? null });
-      });
-      const unsubProgress = api?.onBackendProgress?.((progress) => {
-        publish({ status: cached?.status ?? "loading", progress });
-      });
-      if (api?.getBackendStatus) {
-        void api.getBackendStatus()
-          .then((status) => publish({ status, progress: cached?.progress ?? null }))
-          .catch(() => publish({ status: "error", progress: cached?.progress ?? null }));
-      } else if (!cached) {
-        // 既没有候选接口也没有状态接口的情况下走不到这里；保险起见标为未启动。
-        publish({ status: "stopped", progress: null });
-      }
-      if (api?.getBackendProgress) {
-        void api.getBackendProgress()
-          .then((progress) => {
-            if (progress) publish({ status: cached?.status ?? "loading", progress });
-          })
-          .catch(() => undefined);
-      }
-      cleanup = () => {
-        if (typeof unsubStatus === "function") unsubStatus();
-        if (typeof unsubProgress === "function") unsubProgress();
-      };
+      ensureApiSubscription();
     }
 
     return () => {
-      listeners.delete(setSnapshot);
-      cleanup?.();
+      subscribers -= 1;
+      if (subscribers === 0 && unsubscribeApi) unsubscribeApi();
     };
   }, [isDemo]);
 
   function retry() {
-    const api = window.api;
-    if (!api?.retryBackend) {
-      publish({ status: "error", progress: cached?.progress ?? null });
+    const api = platform.api;
+    if (!api) {
+      publish({ status: "error" });
       return;
     }
-    publish({ status: "loading", progress: { fraction: 0, summary: "正在重新启动本地模型…" } });
-    void api.retryBackend()
-      .then(async () => {
-        const status = api.getBackendStatus ? await api.getBackendStatus() : "ready";
-        publish({ status, progress: cached?.progress ?? null });
-      })
-      .catch(() => publish({ status: "error", progress: cached?.progress ?? null }));
+    publish({ status: "loading", progress: { fraction: 0, summary: "正在重新启动本地模型…" }, profile: null });
+    // 真正的状态由 onBackendStatus 推送；这里只负责触发
+    void api.retryBackend().catch(() => publish({ status: "error" }));
   }
 
-  /** 返回日志文本（需要弹窗显示时），或 null（主进程已用系统方式打开 / 没有接口）。 */
+  /** 返回日志文本（需要弹窗显示时），或 null（主进程已用系统方式打开）。 */
   async function openLog(): Promise<string | null> {
-    const api = window.api;
+    const api = platform.api;
+    if (!api) return "浏览器演示模式没有后端日志。";
     try {
-      if (api?.openBackendLog) {
-        await api.openBackendLog();
-        return null;
-      }
-      if (api?.getBackendLogs) return await api.getBackendLogs();
-      return "主进程尚未暴露 openBackendLog 或 getBackendLogs 接口。\n\n请在 preload 中加入受控的日志读取方法，再由 renderer 调用。";
+      await api.openBackendLog();
+      return null;
     } catch (error) {
       return error instanceof Error ? error.message : "读取日志失败。";
     }

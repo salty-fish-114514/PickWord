@@ -26,30 +26,30 @@ export interface SearchMatch {
 }
 
 /**
- * 镜像 div 测量光标像素坐标。
- *
- * 浏览器没有给 <textarea> 提供「第 N 个字符在屏幕哪个位置」的 API，
- * 所以经典做法是：造一个隐藏的 <div>，把 textarea 的字体、行高、宽度、padding、
- * 换行规则全部复制过去，再把「光标之前的文本」塞进去，最后追加一个零宽的 <span> 标记。
- * 这个 span 的 getBoundingClientRect()（浏览器 API：返回元素相对视口的矩形）
- * 就是光标所在的位置。
+ * 段落高度缓存：镜像测量时不再把「光标之前的全部文字」整段排版，只排光标所在的那一段，
+ * 前面各段的高度从缓存里累加。缓存键是段落文本本身（同样的文字在同样的宽度 / 字体下高度一定相同），
+ * 宽度或字体变了（layoutKey 不同）整体作废。全文 1 MB 时，一次测量的成本从「排版 1 MB」降到「排版一段」。
  */
-export function measureCaretPoint(
-  textarea: HTMLTextAreaElement,
-  mirror: HTMLDivElement,
-  text: string,
-  caret: number,
-): CaretPoint | null {
-  const bounds = textarea.getBoundingClientRect();
-  const computed = window.getComputedStyle(textarea);
+export interface CaretLayoutCache {
+  layoutKey: string;
+  heights: Map<string, number>;
+  /** 上一次 split 的结果：正文字符串没变就不重新 split。 */
+  text: string;
+  paragraphs: string[];
+}
 
-  mirror.replaceChildren();
+export function createCaretLayoutCache(): CaretLayoutCache {
+  return { layoutKey: "", heights: new Map(), text: "", paragraphs: [""] };
+}
+
+function copyTypography(mirror: HTMLDivElement, textarea: HTMLTextAreaElement, computed: CSSStyleDeclaration) {
+  const bounds = textarea.getBoundingClientRect();
   mirror.style.position = "fixed";
   // 减去滚动量：镜像是「完整铺开」的，textarea 则是带滚动的视口。
   mirror.style.left = `${bounds.left - textarea.scrollLeft}px`;
   mirror.style.top = `${bounds.top - textarea.scrollTop}px`;
   mirror.style.width = `${textarea.clientWidth}px`;
-  mirror.style.height = `${Math.max(textarea.scrollHeight, textarea.clientHeight)}px`;
+  mirror.style.height = "auto";
   mirror.style.boxSizing = "border-box";
   mirror.style.padding = computed.padding;
   mirror.style.border = "0";
@@ -73,8 +73,96 @@ export function measureCaretPoint(
   mirror.style.visibility = "hidden";
   mirror.style.pointerEvents = "none";
   mirror.style.zIndex = "-1";
+}
 
-  mirror.append(document.createTextNode(text.slice(0, caret)));
+/** 段落块：空段落放一个零宽空格，保证仍占一行。 */
+function paragraphBlock(text: string): HTMLDivElement {
+  const block = document.createElement("div");
+  block.textContent = text.length === 0 ? "\u200b" : text;
+  return block;
+}
+
+/**
+ * 镜像 div 测量光标像素坐标。
+ *
+ * 浏览器没有给 <textarea> 提供「第 N 个字符在屏幕哪个位置」的 API，
+ * 所以经典做法是：造一个隐藏的 <div>，把 textarea 的字体、行高、宽度、padding、
+ * 换行规则全部复制过去，再把文本塞进去，最后在光标处放一个零宽的 <span> 标记。
+ * 这个 span 的 getBoundingClientRect()（浏览器 API：返回元素相对视口的矩形）就是光标所在的位置。
+ *
+ * 这里的版本只排版光标所在段落，其余段落的高度走 cache（见 CaretLayoutCache）。
+ */
+export function measureCaretPoint(
+  textarea: HTMLTextAreaElement,
+  mirror: HTMLDivElement,
+  text: string,
+  caret: number,
+  cache: CaretLayoutCache,
+): CaretPoint | null {
+  const computed = window.getComputedStyle(textarea);
+  copyTypography(mirror, textarea, computed);
+
+  const layoutKey = [
+    textarea.clientWidth,
+    computed.padding,
+    computed.font,
+    computed.lineHeight,
+    computed.letterSpacing,
+    computed.wordSpacing,
+    computed.tabSize,
+    computed.textIndent,
+  ].join("|");
+  if (cache.layoutKey !== layoutKey) {
+    cache.layoutKey = layoutKey;
+    cache.heights.clear();
+  }
+  if (cache.text !== text) {
+    cache.text = text;
+    cache.paragraphs = text.split("\n");
+  }
+  const paragraphs = cache.paragraphs;
+
+  // 光标在第几段、段内偏移多少
+  const safeCaret = Math.max(0, Math.min(caret, text.length));
+  let paragraphIndex = 0;
+  let paragraphStart = 0;
+  for (let i = 0; i < paragraphs.length; i += 1) {
+    const end = paragraphStart + paragraphs[i].length;
+    if (safeCaret <= end) {
+      paragraphIndex = i;
+      break;
+    }
+    paragraphStart = end + 1;
+  }
+
+  // ① 先把前面还没量过高度的段落一次性排版（一次 layout，多次读 offsetHeight）
+  const missing: Array<{ text: string; block: HTMLDivElement }> = [];
+  for (let i = 0; i < paragraphIndex; i += 1) {
+    const paragraph = paragraphs[i];
+    if (!cache.heights.has(paragraph)) missing.push({ text: paragraph, block: paragraphBlock(paragraph) });
+  }
+  if (missing.length > 0) {
+    mirror.replaceChildren(...missing.map((item) => item.block));
+    for (const item of missing) cache.heights.set(item.text, item.block.offsetHeight);
+  }
+  if (cache.heights.size > paragraphs.length * 2 + 256) {
+    // 编辑过的旧段落文本会残留在缓存里；超过两倍就重建，只留当前正文里的段落
+    const live = new Map<string, number>();
+    for (const paragraph of paragraphs) {
+      const height = cache.heights.get(paragraph);
+      if (height !== undefined) live.set(paragraph, height);
+    }
+    cache.heights = live;
+  }
+
+  let above = 0;
+  for (let i = 0; i < paragraphIndex; i += 1) above += cache.heights.get(paragraphs[i]) ?? 0;
+
+  // ② 用一个固定高度的占位块代替前面的段落，再排版光标所在段落
+  const spacer = document.createElement("div");
+  spacer.style.height = `${above}px`;
+  const current = document.createElement("div");
+  current.append(document.createTextNode(paragraphs[paragraphIndex].slice(0, safeCaret - paragraphStart)));
 
   const marker = document.createElement("span");
   marker.textContent = "\u200b"; // 零宽空格，占位但不可见
@@ -82,7 +170,8 @@ export function measureCaretPoint(
   marker.style.width = "1px";
   marker.style.height = computed.lineHeight;
   marker.style.verticalAlign = "top";
-  mirror.append(marker);
+  current.append(marker);
+  mirror.replaceChildren(spacer, current);
 
   const markerBounds = marker.getBoundingClientRect();
   if (markerBounds.width === 0 && markerBounds.height === 0) return null;

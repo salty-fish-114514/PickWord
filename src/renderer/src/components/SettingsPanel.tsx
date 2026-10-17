@@ -7,10 +7,22 @@ import {
   isSampleKey,
   PEEK_KEY_LABEL,
   SAMPLE_KEY_LABEL,
+  SETTING_LIMITS,
   type PeekKey,
+  TIER_LABEL,
+  TIER_PRESETS,
+  TIER_SLOTS,
+  detectTier,
+  type ComputeTier,
   type SampleKey,
   type SettingsValues,
 } from "../lib/settings";
+
+/** 百分比显示的设置项（内部存 0~1）：把范围也换算成百分比。 */
+function percentLimits(key: "eosMinProb" | "fadeOpacity") {
+  const { min, max } = SETTING_LIMITS[key];
+  return { min: Math.round(min * 100), max: Math.round(max * 100), step: 1 };
+}
 
 /** 一个通用的滑杆设置项，避免复制粘贴十几遍相同的 JSX。 */
 function RangeSetting({
@@ -99,6 +111,57 @@ function SelectSetting<T extends string>({
   );
 }
 
+/** 算力档位：一键拨好几个自动项；单项另改过就显示「自定义」。 */
+function TierSetting({
+  values,
+  detectedSlots,
+  onApply,
+  onOpenBackendSettings,
+}: {
+  values: SettingsValues;
+  detectedSlots: number | null;
+  onApply: (tier: ComputeTier) => void;
+  onOpenBackendSettings?: () => void;
+}) {
+  const current = detectTier(values);
+  const needSlots = current === "high" && detectedSlots !== null && detectedSlots < TIER_SLOTS.high;
+  return (
+    <div className="setting-block theme-block">
+      <span className="setting-title">算力档位{current === "custom" ? "（自定义）" : ""}</span>
+      <div className="theme-options tier-options" role="group" aria-label="算力档位">
+        {(["low", "mid", "high"] as const).map((tier) => (
+          <button
+            key={tier}
+            className={`theme-option ${current === tier ? "is-selected" : ""}`}
+            type="button"
+            aria-pressed={current === tier}
+            onClick={() => onApply(tier)}
+          >
+            <span>{TIER_LABEL[tier]}</span>
+          </button>
+        ))}
+      </div>
+      <p className="setting-hint">
+        {current === "custom" ? "下面的自动项已单独改过；点一档可整体恢复。" : TIER_DESCRIPTION[current]}{" "}
+        槽 0 出候选和展开，槽 1 纠错，槽 2 人设校验；这些自动项也可以在下面和「纠错」页单独开关。
+      </p>
+      {needSlots && (
+        <p className="setting-hint is-warning">
+          本地模型目前只有 {detectedSlots} 个槽位，人设校验会排在纠错后面。到「模型与推理」把「并行槽位」设为 3 才能并行。
+          {onOpenBackendSettings && (
+            <>
+              {" "}
+              <button className="link-button" type="button" onClick={onOpenBackendSettings}>
+                打开模型与推理
+              </button>
+            </>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** 「标题 + 说明 + 开关」一行，快速模式 / 浮窗常驻共用。 */
 function SwitchSetting({
   title,
@@ -141,9 +204,19 @@ interface SettingsPanelProps {
   onChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onResetAdvanced: () => void;
   onClose: () => void;
-  /** 引导用户回到配置页重新设置模型和推理引擎 */
-  onReconfigureModel?: () => void;
+  /** 打开「模型与推理」面板（换模型 / 引擎 / 设备 / 启动参数）。演示模式没有。 */
+  onOpenBackendSettings?: () => void;
+  /** 后端实际生效的上下文长度（来自 ModelProfile）；有值时滑杆只作兜底。 */
+  detectedContextLen?: number | null;
+  /** 后端实际的并行槽位数；「高」档需要 3 个。 */
+  detectedSlots?: number | null;
 }
+
+const TIER_DESCRIPTION: Record<ComputeTier, string> = {
+  low: "只出候选；短句展开、纠错、人设校验都手动触发。2 个槽位。",
+  mid: "停笔 2 秒自动展开短句，停笔后自动纠错；人设校验手动。2 个槽位。",
+  high: "候选一出就展开，自动纠错并随纠错校验人设（第 3 个槽位并行）。",
+};
 
 /**
  * 设置面板：两页。
@@ -160,7 +233,9 @@ export function SettingsPanel({
   onChange,
   onResetAdvanced,
   onClose,
-  onReconfigureModel,
+  onOpenBackendSettings,
+  detectedContextLen,
+  detectedSlots = null,
 }: SettingsPanelProps) {
   const [page, setPage] = useState<"basic" | "advanced">("basic");
 
@@ -204,9 +279,7 @@ export function SettingsPanel({
             id="candidate-count"
             label="每页候选数"
             value={values.candidateCount}
-            min={3}
-            max={10}
-            step={1}
+            {...SETTING_LIMITS.candidateCount}
             unit="个"
             minLabel="3 个"
             maxLabel="10 个"
@@ -217,9 +290,7 @@ export function SettingsPanel({
             id="trigger-delay"
             label="触发延迟"
             value={values.triggerDelay}
-            min={200}
-            max={1000}
-            step={50}
+            {...SETTING_LIMITS.triggerDelay}
             unit="毫秒"
             minLabel="200 毫秒"
             maxLabel="1000 毫秒"
@@ -230,9 +301,7 @@ export function SettingsPanel({
             id="auto-save-interval"
             label="自动保存周期"
             value={values.autoSaveInterval}
-            min={1000}
-            max={30000}
-            step={1000}
+            {...SETTING_LIMITS.autoSaveInterval}
             unit="秒"
             minLabel="1 秒"
             maxLabel="30 秒"
@@ -244,9 +313,7 @@ export function SettingsPanel({
             id="font-size"
             label="正文字号"
             value={values.fontSize}
-            min={16}
-            max={22}
-            step={1}
+            {...SETTING_LIMITS.fontSize}
             unit="像素"
             minLabel="16 像素"
             maxLabel="22 像素"
@@ -277,6 +344,17 @@ export function SettingsPanel({
             </div>
           </div>
 
+          <TierSetting
+            values={values}
+            detectedSlots={detectedSlots ?? null}
+            onApply={(tier) => {
+              for (const [key, value] of Object.entries(TIER_PRESETS[tier]) as [keyof typeof TIER_PRESETS.low, boolean | number][]) {
+                if (values[key] !== value) onChange(key, value as never);
+              }
+            }}
+            onOpenBackendSettings={onOpenBackendSettings}
+          />
+
           <SwitchSetting
             title="快速模式"
             description="浮层常驻、零延迟刷新。长按穿透键可暂时淡出浮层并正常输入数字、回车、空格。"
@@ -289,24 +367,41 @@ export function SettingsPanel({
             checked={values.keepPopover}
             onToggle={() => onChange("keepPopover", !values.keepPopover)}
           />
+          <SwitchSetting
+            title="短句展开"
+            description="长按随机取词键，浮窗里的候选依次从词长成短句（流式）；数字键 / Enter 接受整句，流到一半按下就取已显示的部分。"
+            checked={values.expandEnabled}
+            onToggle={() => onChange("expandEnabled", !values.expandEnabled)}
+          />
+          <SwitchSetting
+            title="停笔后自动展开"
+            description="候选出现后，停笔达到下面设定的秒数就自动开始展开，不必长按。期间任何按键都会重新计时。"
+            checked={values.expandAuto}
+            onToggle={() => onChange("expandAuto", !values.expandAuto)}
+          />
+          {values.expandAuto && (
+            <RangeSetting
+              id="expand-idle"
+              label="停笔多久后开始展开"
+              value={values.expandIdleMs}
+              {...SETTING_LIMITS.expandIdleMs}
+              unit="秒"
+              minLabel="0.25 秒（候选一出就展开）"
+              maxLabel="10 秒"
+              format={(value) => `${(value / 1000).toFixed(value % 1000 === 0 ? 0 : 2)} 秒`}
+              hint="调到最小就是「总是自动展开」；每轮展开约 5 次短解码，设得太短时连续写作显卡会一直有活干。"
+              onChange={(value) => onChange("expandIdleMs", value)}
+            />
+          )}
 
-          {/* 模型配置区：放在高级设置上方，因为这是常用操作 */}
-          {onReconfigureModel && (
+          {onOpenBackendSettings && (
             <div className="setting-block reconfigure-block">
               <span className="setting-title">模型与推理引擎</span>
-              <p className="setting-hint">
-                更换模型文件、切换 GPU 后端（CUDA / ROCm / Vulkan）或调整推理参数。
-              </p>
-              <button
-                className="quiet-button quiet-button-accent"
-                type="button"
-                onClick={onReconfigureModel}
-              >
-                重新配置模型
+              <p className="setting-hint">更换模型文件、推理设备、线程数与上下文长度，或重新运行安装向导。</p>
+              <button className="quiet-button quiet-button-accent" type="button" onClick={onOpenBackendSettings}>
+                打开「模型与推理」
               </button>
-              <p className="setting-hint reconfigure-warning">
-                ⚠ 修改配置后模型会自动重新加载，写作中的候选功能会短暂中断。
-              </p>
+              <p className="setting-hint reconfigure-warning">⚠ 应用新配置时模型会重新加载，候选功能会短暂中断。</p>
             </div>
           )}
 
@@ -327,23 +422,23 @@ export function SettingsPanel({
             id="model-context-len"
             label="模型上下文长度"
             value={values.modelContextLen}
-            min={4096}
-            max={131072}
-            step={2048}
+            {...SETTING_LIMITS.modelContextLen}
             unit="token"
             minLabel="4096"
             maxLabel="131072"
             format={(value) => `${value} token`}
-            hint="请与 llama-server 的 -c 参数保持一致。按「1 字 = 1 token」最保守估算：锚点模式的正文 + 风格 + 大纲超过它时，会自动退出锚点模式。"
+            hint={
+              detectedContextLen
+                ? `当前模型实际上下文为 ${detectedContextLen} token（已从后端自动读取并采用）；此滑杆只在读不到时作为兜底。`
+                : "请与 llama-server 的 -c 参数保持一致。按「1 字 = 1 token」最保守估算：锚点模式的正文 + 风格 + 大纲超过它时，会自动退出锚点模式。"
+            }
             onChange={(value) => onChange("modelContextLen", value)}
           />
           <RangeSetting
             id="max-body-len"
             label="正文窗口上限"
             value={values.maxBodyLen}
-            min={4000}
-            max={20000}
-            step={1000}
+            {...SETTING_LIMITS.maxBodyLen}
             unit="字"
             minLabel="4000 字"
             maxLabel="20000 字"
@@ -354,9 +449,7 @@ export function SettingsPanel({
             id="window-advance"
             label="窗口推进步长"
             value={values.windowAdvanceMinChars}
-            min={100}
-            max={1000}
-            step={50}
+            {...SETTING_LIMITS.windowAdvanceMinChars}
             unit="字"
             minLabel="100 字"
             maxLabel="1000 字"
@@ -367,9 +460,7 @@ export function SettingsPanel({
             id="anchor-warn"
             label="锚点正文过长提醒"
             value={values.anchorWarnLen}
-            min={2000}
-            max={10000}
-            step={500}
+            {...SETTING_LIMITS.anchorWarnLen}
             unit="字"
             minLabel="2000 字"
             maxLabel="10000 字"
@@ -382,9 +473,7 @@ export function SettingsPanel({
             id="soften-temperature"
             label="概率软化温度"
             value={values.softenTemperature}
-            min={1}
-            max={4}
-            step={0.1}
+            {...SETTING_LIMITS.softenTemperature}
             unit=""
             minLabel="1.0（原始）"
             maxLabel="4.0（最平）"
@@ -396,9 +485,7 @@ export function SettingsPanel({
             id="eos-scan"
             label="终止符扫描范围"
             value={values.eosScanTopN}
-            min={5}
-            max={50}
-            step={5}
+            {...SETTING_LIMITS.eosScanTopN}
             unit="个"
             minLabel="前 5 个"
             maxLabel="前 50 个"
@@ -409,9 +496,7 @@ export function SettingsPanel({
             id="eos-min-prob"
             label="终止符最低概率"
             value={Math.round(values.eosMinProb * 100)}
-            min={0}
-            max={60}
-            step={1}
+            {...percentLimits("eosMinProb")}
             unit="%"
             minLabel="0%（只看排名）"
             maxLabel="60%"
@@ -423,9 +508,7 @@ export function SettingsPanel({
             id="eos-threshold"
             label="提醒触发次数"
             value={values.eosThreshold}
-            min={1}
-            max={10}
-            step={1}
+            {...SETTING_LIMITS.eosThreshold}
             unit="次"
             minLabel="1 次"
             maxLabel="10 次"
@@ -436,9 +519,7 @@ export function SettingsPanel({
             id="prefill-hint"
             label="重算上下文提示阈值"
             value={values.prefillHintSeconds}
-            min={0}
-            max={60}
-            step={1}
+            {...SETTING_LIMITS.prefillHintSeconds}
             unit="秒"
             minLabel="0 秒（总是提示）"
             maxLabel="60 秒"
@@ -451,9 +532,7 @@ export function SettingsPanel({
             id="fade-opacity"
             label="浮窗淡化透明度"
             value={Math.round(values.fadeOpacity * 100)}
-            min={5}
-            max={60}
-            step={1}
+            {...percentLimits("fadeOpacity")}
             unit="%"
             minLabel="5%（几乎隐形）"
             maxLabel="60%"
@@ -475,9 +554,7 @@ export function SettingsPanel({
             id="peek-hold"
             label="长按判定时长"
             value={values.peekHoldMs}
-            min={150}
-            max={600}
-            step={10}
+            {...SETTING_LIMITS.peekHoldMs}
             unit="毫秒"
             minLabel="150 毫秒"
             maxLabel="600 毫秒"

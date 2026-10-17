@@ -1,12 +1,16 @@
 /**
  * WritingEditor.tsx - 单篇编辑器
- * 
- * 从 App.tsx 中提取，保留原有的输入法、候选、查找与大纲逻辑。
+ *
+ * 只负责把输入法、候选、查找与大纲这些交互串起来；可独立的部分都在 lib/ 里：
+ *   候选调度 lib/candidateScheduler · 结果后处理 lib/candidatePostprocess
+ *   版本号保存 lib/useVersionedSave · 撤销重做 lib/useEditHistory · 关窗落盘 lib/flushRegistry
+ *   浮层定位在 components/CandidatePopover 内部。
  * 文稿读写由文库按 id 提供。
  */
 
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -15,43 +19,78 @@ import {
   type ChangeEvent,
   type CSSProperties,
   type KeyboardEvent,
+  type MouseEvent,
 } from "react";
 
-import { BackendStatusBar, formatEta } from "./components/BackendStatusBar";
+import { BackendStatusBar } from "./components/BackendStatusBar";
+import { formatEta } from "./lib/format";
 import { BrandLogo } from "./components/BrandLogo";
-import { CandidatePopover } from "./components/CandidatePopover";
-import { ContextSidebar } from "./components/ContextSidebar";
+import { CandidatePopover, type CandidatePopoverHandle } from "./components/CandidatePopover";
+import { ChapterPanel } from "./components/ChapterPanel";
+import { ChapterTitleField } from "./components/ChapterTitleField";
+import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { FontPicker, FontSizePicker } from "./components/FontPicker";
 import { GentleToast } from "./components/GentleToast";
 import { Icon } from "./components/Icon";
 import { SearchPanel } from "./components/SearchPanel";
+import { WorkbenchPanel, WorkbenchRail, type WorkbenchTab } from "./components/workbench/Workbench";
+import { countChars, REBUILD_HINT_CHARS, safeFileName } from "../../shared/text";
+import { postprocessCandidates } from "./lib/candidatePostprocess";
 import {
-  applySoftening,
   BACKEND_TOP_K,
   chooseCandidateSource,
   createRequestId,
   estimatePrefillSeconds,
   sampleByProbability,
 } from "./lib/candidateProvider";
-import { diversifyCandidates } from "./lib/candidateDiversity";
-import { useBackendStatus } from "./lib/useBackendStatus";
+import { CandidateScheduler, type CandidateJob } from "./lib/candidateScheduler";
+import {
+  chapterAt,
+  chapterLabel,
+  defaultChapterTitleAt,
+  insertChapterMark,
+  parseChapters,
+  removeChapterMark,
+  renameChapterMark,
+  renumberChapters,
+  type Chapter,
+  type VolumeSummary,
+} from "./lib/chapters";
+import { splitByDecorations, type Decoration } from "./lib/decorations";
+import { fontStackFor } from "./lib/fonts";
+import { ISSUE_KIND_LABEL, type Issue } from "./lib/proofread";
+import { useProofreader } from "./lib/useProofreader";
+import { useExpander, type ExpandItem } from "./lib/useExpander";
 import {
   commonPrefixLength,
   diffEditSpan,
   findMatches,
-  makeFingerprint,
-  mapAnchorThroughEdit,
   mapOffsetThroughEdit,
-  measureCaretPoint,
   paragraphStartAt,
-  snapAnchorOffset,
 } from "./lib/editorText";
-import { chooseLibraryProvider } from "./lib/library";
+import {
+  createSegment,
+  layoutOutline,
+  mapSegmentsThroughEdit,
+  migrateLegacyOutline,
+  remapSegments,
+  segmentAt,
+  segmentInjects,
+  segmentKey,
+  segmentStartingAt,
+  sortSegments,
+  type ResolvedSegment,
+} from "./lib/outline";
+import { registerFlusher } from "./lib/flushRegistry";
+import { buildMaterialsText, findMaterialHits, mergeStickyHits, type MaterialHit } from "./lib/materials";
+import { platform } from "./lib/platform";
+import { useBackendStatus } from "./lib/useBackendStatus";
+import { useEditHistory } from "./lib/useEditHistory";
+import { useVersionedSave } from "./lib/useVersionedSave";
 import {
   advanceSlidingWindow,
-  ANCHOR_BEFORE_CURSOR_NOTICE,
   bodyHardLimit,
   buildPrompt,
-  isAnchorOverflow,
   PROMPT_MODE_LABEL,
   slidingWindowMaxBodyLen,
   type BuildPromptArgs,
@@ -63,38 +102,30 @@ import {
   type SettingsValues,
 } from "./lib/settings";
 import type {
+  BookRef,
   Candidate,
   ContextState,
   DocumentPayload,
   EditorSnapshot,
   LibraryEntry,
   LibraryFormat,
+  Materials,
+  ModelProfile,
   SaveStatus,
   SelectionRange,
 } from "./lib/types";
+import { EMPTY_MATERIALS } from "../../shared/materials";
+import { CHATML_TEMPLATE } from "../../shared/modelProfile";
 
 /* ════════════════════════════════════════════════════════════════
    常量
    ════════════════════════════════════════════════════════════════ */
 
-/** 预计需要重新 prefill 的字符数超过它，状态栏给一句「上下文重算」提示。 */
-const REBUILD_HINT_CHARS = 400;
 /** 一般短暂提示的停留时长。 */
 const NOTICE_MS = 8000;
-/** 「自动退出锚点模式」这种重要提示停留更久。 */
-const IMPORTANT_NOTICE_MS = 20000;
 
-/** 启动时决定数据源：有 window.api 走真实 IPC，否则走演示 mock。 */
+/** 启动时决定数据源：Electron 走真实 IPC，浏览器走演示 mock。 */
 const candidateSource = chooseCandidateSource();
-/** 多篇文稿有单独的按 ID 数据源；不能用旧版全局 currentPath 保存新文库。 */
-const libraryProvider = chooseLibraryProvider();
-
-/** 一次候选请求的「任务描述」：正文快照 + 光标 + 当时是不是快速模式。 */
-interface CandidateJob {
-  text: string;
-  range: SelectionRange;
-  quick: boolean;
-}
 
 /** 编辑区上方的文件提示条（打开 Word / 非 UTF-8 文本 / 打开失败）。 */
 interface FileBanner {
@@ -102,33 +133,54 @@ interface FileBanner {
   text: string;
 }
 
-/** 把 UI 状态翻译成 PromptBuilder 的入参（一个纯函数，多处共用）。 */
+/** 实际生效的模型上下文长度：优先用主进程从 llama-server 读到的值，读不到才用设置里的。 */
+function effectiveContextLen(profile: ModelProfile | null, settings: SettingsValues): number {
+  return profile?.contextLength ?? settings.modelContextLen;
+}
+
+/** 总纲与本章大纲合并成送入模型的大纲文本；都为空返回 undefined。 */
+/**
+ * 把 UI 状态翻译成 PromptBuilder 的入参（一个纯函数，多处共用）。
+ *
+ * 大纲只来自光标所在的大纲段（lib/outline.ts）：有文字且开着 → 注入它，正文从段起点一刀切送到光标
+ * （旧锚点语义）；段起点到光标超过硬上限时锚点置空、退回滑窗，大纲照常注入。总纲永不注入。
+ */
 function promptArgsFor(
   text: string,
   caret: number,
   ctx: ContextState,
   settings: SettingsValues,
   windowStart: number,
+  profile: ModelProfile | null,
+  materialsText: string | undefined,
 ): BuildPromptArgs {
-  const outlineText = ctx.outlineEnabled ? ctx.outlineText : undefined;
-  const outlineActive = Boolean(outlineText?.trim());
+  const chapterIndex = parseChapters(text);
+  const segment = segmentAt(layoutOutline(text, chapterIndex, ctx.outlineSegments), chapterIndex, caret);
+  const injecting = segmentInjects(segment, caret, ctx.outlineEnabled);
+  const outlineText = injecting && segment.segment ? segment.segment.text : undefined;
+  const styleText = ctx.styleEnabled ? ctx.styleText : undefined;
+  const modelContextLen = effectiveContextLen(profile, settings);
+  const template = profile?.template;
+
+  let anchorOffset: number | null = null;
+  if (injecting) {
+    const limit = bodyHardLimit(modelContextLen, styleText, outlineText, template, materialsText);
+    if (caret - segment.start < limit) anchorOffset = segment.start;
+  }
+
   return {
-    styleText: ctx.styleEnabled ? ctx.styleText : undefined,
+    styleText,
     outlineText,
+    materialsText,
     docText: text,
     cursorOffset: caret,
-    anchorOffset: outlineActive ? ctx.anchor?.offset ?? null : null,
+    anchorOffset,
     windowStart,
     maxBodyLen: settings.maxBodyLen,
     anchorWarnLen: settings.anchorWarnLen,
-    modelContextLen: settings.modelContextLen,
+    modelContextLen,
+    template,
   };
-}
-
-/** 文件名里不能出现的字符替换成下划线。 */
-function safeFileName(title: string): string {
-  const trimmed = title.trim() || "未命名";
-  return trimmed.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 80);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -138,15 +190,35 @@ function safeFileName(title: string): string {
 export interface WritingEditorProps {
   initial: DocumentPayload;
   sourceFormat: LibraryFormat;
+  /** 长篇的一卷时存在：标题区显示「书名 · 第 N 卷」。 */
+  book?: BookRef;
+  /** 长篇时全书各卷（目录面板里切换）；切换 / 新建前编辑器会先保存当前卷。 */
+  volumes?: VolumeSummary[];
+  onSwitchVolume?: (id: string) => Promise<void>;
+  onCreateVolume?: () => Promise<void>;
   settings: SettingsValues;
   /** 顶栏「自动保存」开关直接写进设置（持久化），所以由 App 提供修改入口。 */
   onToggleAutoSave: (enabled: boolean) => void;
+  /** 面板里的持久化开关（纠错的自动检查 / 本地提示）。 */
+  onSettingChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onSave: (document: DocumentPayload) => Promise<LibraryEntry>;
   onBack: () => void;
 }
 
 /** 编辑器仍保留原有的输入法、候选、查找与大纲逻辑；文稿读写由文库按 id 提供。 */
-export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSave, onSave, onBack }: WritingEditorProps) {
+export function WritingEditor({
+  initial,
+  sourceFormat,
+  book,
+  volumes,
+  onSwitchVolume,
+  onCreateVolume,
+  settings,
+  onToggleAutoSave,
+  onSettingChange,
+  onSave,
+  onBack,
+}: WritingEditorProps) {
   const initialCaret = initial.content.length;
   const autoSaveEnabled = settings.autoSaveEnabled;
 
@@ -159,19 +231,81 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   const [content, setContent] = useState(initial.content);
   const [selection, setSelection] = useState<SelectionRange>({ start: initialCaret, end: initialCaret });
 
-  /* ── 写作上下文（侧边栏三件套） ─────────────────── */
-  const [context, setContext] = useState<ContextState>({
-    styleEnabled: initial.styleEnabled,
-    styleText: initial.styleText,
-    outlineEnabled: initial.outlineEnabled,
-    outlineText: initial.outlineText,
-    anchor: initial.anchor,
+  /* ── 写作上下文（风格 / 总纲备忘 / 大纲段）。旧旁车（≤ v4）在这里一次迁移成大纲段。 ── */
+  const [context, setContext] = useState<ContextState>(() => {
+    if (initial.outlineSegments) {
+      return {
+        styleEnabled: initial.styleEnabled,
+        styleText: initial.styleText,
+        outlineEnabled: initial.outlineEnabled,
+        outlineText: initial.outlineText,
+        outlineSegments: sortSegments(initial.outlineSegments),
+      };
+    }
+    const migrated = migrateLegacyOutline(initial.content, parseChapters(initial.content), {
+      outlineText: initial.outlineText,
+      chapterOutlines: initial.chapterOutlines ?? {},
+      anchor: initial.anchor,
+    });
+    return {
+      styleEnabled: initial.styleEnabled,
+      styleText: initial.styleText,
+      // 旧版的开关管「总纲 + 分章」：迁出了段就沿用作者原来的开关；没有段就默认开着（新段默认注入）
+      outlineEnabled: migrated.segments.length > 0 ? initial.outlineEnabled : true,
+      outlineText: migrated.notes,
+      outlineSegments: migrated.segments,
+    };
   });
   const [anchorNotice, setAnchorNotice] = useState<string | null>(null);
+  /** 大纲页要聚焦的卡片（segmentKey）：右键新起一段 / EOS 提醒时设置，面板处理完清空。 */
+  const [outlineFocusKey, setOutlineFocusKey] = useState<string | null>(null);
+  const clearOutlineFocus = useCallback(() => setOutlineFocusKey(null), []);
 
-  /* ── 面板开合。侧边栏默认折叠：第一次打开软件只看到干净的编辑区。 ── */
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  /* ── 角色卡 / 设定（长篇各卷共用，随文稿一起保存） ── */
+  const [materials, setMaterials] = useState<Materials>(initial.materials ?? EMPTY_MATERIALS);
+  /** 当前注入提示词的卡片命中（黏性集合，见 lib/materials.ts）。 */
+  const [hits, setHits] = useState<MaterialHit[]>([]);
+
+  /* ── 面板开合。右侧面板默认折叠：第一次打开软件只看到干净的编辑区。 ── */
+  const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab | null>(null);
+
+  /* ── 纠错（lib/useProofreader.ts）：人名不算重复 ── */
+  const ignoreNames = useMemo(
+    () => [
+      ...materials.characters.flatMap((card) => [card.name, ...card.aliases]),
+      ...materials.lore.flatMap((entry) => [entry.name, ...entry.aliases]),
+    ].map((name) => name.trim()).filter((name) => name.length >= 2),
+    [materials],
+  );
+  const proofreader = useProofreader({
+    content,
+    caret: selection.start,
+    template: backend.profile?.template ?? CHATML_TEMPLATE,
+    noThinkPrefix: backend.profile?.noThinkPrefix ?? "",
+    backendReady: candidateSource.isDemo || backendStatus === "ready",
+    slots: backend.profile?.slots ?? 1,
+    auto: settings.proofreadAuto,
+    local: settings.proofreadLocal,
+    consistencyAuto: settings.consistencyAuto,
+    materials,
+    ignoreNames,
+  });
+
+  /* ── 短句展开（lib/useExpander.ts）：浮窗里的候选行依次长成短句 ── */
+  const expander = useExpander();
+  /** 停笔自动展开的计时器。 */
+  const expandTimerRef = useRef<number | null>(null);
+  /** 最近一次操作（按键 / 光标移动 / 改动）的时刻：停笔计时的起点。 */
+  const lastActivityRef = useRef(performance.now());
+  /** 当前页候选 → 展开项（镜像成 ref，计时器到点时取最新的一页）。 */
+  const pageItemsRef = useRef<ExpandItem[]>([]);
+  /** 取样键长按计时器：短按 = 随机取词（keyup 时执行），长按 = 展开。 */
+  const sampleHoldTimerRef = useRef<number | null>(null);
+  /** 当前显示的候选对应的提示词（展开要接在它后面；lastPromptRef 可能已被更新的在飞请求改写）。 */
+  const candidatePromptRef = useRef("");
+  const [chaptersOpen, setChaptersOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
 
   /* ── 查找替换 ─────────────────────────────────── */
   const [searchQuery, setSearchQuery] = useState("");
@@ -187,49 +321,44 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   const [candidateError, setCandidateError] = useState<string | null>(null);
   /** 空候选提示：模型这次没给出可插入的词，不是故障。 */
   const [candidateNotice, setCandidateNotice] = useState<string | null>(null);
-  const [candidatePosition, setCandidatePosition] = useState<{ left: number; top: number } | null>(null);
   const [peekActive, setPeekActive] = useState(false);
   const [prefillChars, setPrefillChars] = useState(0);
 
   /* ── 保存 ─────────────────────────────────────── */
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
   const [returning, setReturning] = useState(false);
 
   /* ── 其它 ─────────────────────────────────────── */
   const [isComposing, setIsComposing] = useState(false);
   const [logText, setLogText] = useState<string | null>(null);
-  const [historyRevision, setHistoryRevision] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
   const [windowNotice, setWindowNotice] = useState<string | null>(null);
   /** 重算上下文的提示文案（含预计耗时）；null = 不提示。 */
   const [rebuildHint, setRebuildHint] = useState<string | null>(null);
   const [toastVisible, setToastVisible] = useState(false);
-  const [outlineHighlighted, setOutlineHighlighted] = useState(false);
   const [fileBanner, setFileBanner] = useState<FileBanner | null>(sourceFormat === "docx"
     ? { kind: "info", text: "这篇文稿由 Word 导入，只保留纯文本。原 Word 文件不会被修改；文库以 TXT 保存正文。" }
     : null);
 
   /* ── refs：跨事件、跨异步回调保存最新值 ────────────── */
   const editorRef = useRef<HTMLTextAreaElement>(null);
-  const mirrorRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const outlineInputRef = useRef<HTMLTextAreaElement>(null);
+  const popoverRef = useRef<CandidatePopoverHandle>(null);
 
   const contentRef = useRef(content);
   const titleRef = useRef(title);
   const selectionRef = useRef<SelectionRange>({ start: initialCaret, end: initialCaret });
   const contextRef = useRef(context);
+  const materialsRef = useRef(materials);
+  /** 黏性命中集合：窗口起点不变时只增不减。 */
+  const stickyHitsRef = useRef<{ bodyStart: number; hits: MaterialHit[] } | null>(null);
   const settingsRef = useRef(settings);
   const backendStatusRef = useRef(backendStatus);
+  const profileRef = useRef(backend.profile);
   const compositionRef = useRef(false);
   const editorFocusedRef = useRef(false);
 
-  // 候选请求的调度状态：防抖计时器 / 在飞请求 / 排队中的最新任务
-  const candidateTimerRef = useRef<number | null>(null);
-  const inFlightRef = useRef<AbortController | null>(null);
-  const pendingJobRef = useRef<CandidateJob | null>(null);
-  const runJobRef = useRef<(job: CandidateJob) => void>(() => undefined);
+  // 候选请求调度（防抖 / 单飞 / 最新优先）；runner 每次渲染更新成最新闭包
+  const [scheduler] = useState(() => new CandidateScheduler(candidateSource.supportsCancel));
   const lastPromptRef = useRef("");
 
   // 穿透键
@@ -241,15 +370,20 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   const writtenSinceUpdateRef = useRef(0);
 
   // 撤销 / 重做
-  const undoStackRef = useRef<EditorSnapshot[]>([]);
-  const redoStackRef = useRef<EditorSnapshot[]>([]);
-  const lastEditGroupRef = useRef<{ kind: string; time: number } | null>(null);
+  const history = useEditHistory(() => ({
+    text: contentRef.current,
+    start: selectionRef.current.start,
+    end: selectionRef.current.end,
+  }));
 
-  // 保存版本号：每次改动 +1；保存成功时记下版本，二者相等 = 已落盘
-  const saveVersionRef = useRef(0);
-  const savedVersionRef = useRef(0);
-  const performSaveRef = useRef<() => Promise<boolean>>(async () => true);
-  const saveInFlightRef = useRef<Promise<boolean> | null>(null);
+  // 保存：版本号驱动；主进程如因重名调整了标题，让编辑器显示实际保存的名字。
+  const { saveStatus, markDirty, save: performSave, saveRef } = useVersionedSave(async (isLatest) => {
+    const entry = await onSave(buildPayload());
+    if (isLatest() && entry.title !== titleRef.current) {
+      titleRef.current = entry.title;
+      setTitle(entry.title);
+    }
+  });
 
   // EOS 弱提醒
   const eosCounterRef = useRef(0);
@@ -267,6 +401,7 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   contextRef.current = context;
   settingsRef.current = settings;
   backendStatusRef.current = backendStatus;
+  profileRef.current = backend.profile;
 
   // 打开一篇文稿意味着继续写作：把光标放在正文末尾，再让 textarea 获得焦点。
   // onFocus 会用这个真实选区请求候选，不会拿默认的 0 偏移误判断"光标在锚点之前"。
@@ -297,66 +432,83 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
      A. 提示词
      ════════════════════════════════════════════════════════════════ */
 
-  /** 用 ref 里的最新状态拼 prompt，可以安全地在异步回调里调用。 */
+  /** 当前黏性命中集合对应的「人物与设定」文本（没有命中返回 undefined）。 */
+  function currentMaterialsText(): string | undefined {
+    const sticky = stickyHitsRef.current;
+    if (!sticky || sticky.hits.length === 0) return undefined;
+    return buildMaterialsText(materialsRef.current, sticky.hits) || undefined;
+  }
+
+  /** 用 ref 里的最新状态拼 PromptBuilder 入参，可以安全地在异步回调里调用。 */
+  function currentArgs(text: string, caret: number): BuildPromptArgs {
+    return promptArgsFor(
+      text,
+      caret,
+      contextRef.current,
+      settingsRef.current,
+      windowStartRef.current,
+      profileRef.current,
+      currentMaterialsText(),
+    );
+  }
+
+  /**
+   * 拼 prompt 并刷新素材命中：先按旧命中集合算出正文窗口，在窗口里找新出场的名字，
+   * 命中集合变了就用新集合再拼一次。窗口起点不变时集合只增不减（黏性），减少缓存重算。
+   */
   function buildCurrentPrompt(text: string, caret: number) {
-    return buildPrompt(promptArgsFor(text, caret, contextRef.current, settingsRef.current, windowStartRef.current));
+    let args = currentArgs(text, caret);
+    let built = buildPrompt(args);
+    const fresh = findMaterialHits(materialsRef.current, text, built.bodyStart, built.bodyEnd);
+    const merged = mergeStickyHits(stickyHitsRef.current, built.bodyStart, fresh);
+    stickyHitsRef.current = { bodyStart: built.bodyStart, hits: merged };
+    const nextText = buildMaterialsText(materialsRef.current, merged) || undefined;
+    if (nextText !== args.materialsText) {
+      args = { ...args, materialsText: nextText };
+      built = buildPrompt(args);
+    }
+    return built;
   }
 
   /**
    * 渲染用的 prompt 预览（纯函数推导，不发请求）。
-   * 用途：① 侧边栏显示当前模式与正文长度；② 编辑区给「送入模型的正文」加浅背景。
+   * 用途：面板显示当前模式与正文长度、状态栏模式标签、锚点装饰位置。
+   * 素材命中用上一次的黏性集合；下面的 effect 会在它过期时刷新 hits 状态。
    */
+  const previewMaterialsText = useMemo(() => buildMaterialsText(materials, hits) || undefined, [materials, hits]);
   const promptPreview = useMemo(
-    () => buildPrompt(promptArgsFor(content, selection.start, context, settings, windowStart)),
-    [content, selection.start, context, settings, windowStart],
+    () => buildPrompt(promptArgsFor(content, selection.start, context, settings, windowStart, backend.profile, previewMaterialsText)),
+    [content, selection.start, context, settings, windowStart, backend.profile, previewMaterialsText],
   );
+
+  // 素材命中集合：正文窗口变化后刷新（effect 里更新 ref 与 state，不在渲染期改 ref）。
+  useEffect(() => {
+    const fresh = findMaterialHits(materials, content, promptPreview.bodyStart, promptPreview.bodyEnd);
+    const merged = mergeStickyHits(stickyHitsRef.current, promptPreview.bodyStart, fresh);
+    stickyHitsRef.current = { bodyStart: promptPreview.bodyStart, hits: merged };
+    setHits((previous) => {
+      if (previous.length === merged.length && previous.every((h, i) => h.id === merged[i].id && h.count === merged[i].count)) return previous;
+      return merged;
+    });
+  }, [materials, content, promptPreview.bodyStart, promptPreview.bodyEnd]);
+
+  /* ── 章节 ── */
+  const chapterIndex = useMemo(() => parseChapters(content), [content]);
+  const currentChapter = useMemo(() => chapterAt(chapterIndex, selection.start), [chapterIndex, selection.start]);
 
   /* ════════════════════════════════════════════════════════════════
      B. 滑动窗口 + 锚点硬上限
      ════════════════════════════════════════════════════════════════ */
 
   /**
-   * 锚点正文超过硬上限：清除锚点、关闭大纲，回退到滑动窗口。
-   *
-   * 注意「大纲」只是被关闭，文字仍保留在侧边栏（和「关闭开关只变灰、内容保留」的原则一致），
-   * 作者可以随时重新开启并重设锚点；如果你希望连文字一起清空，把下面的 outlineText 改成 "" 即可。
-   */
-  function dropAnchorMode(length: number, limit: number) {
-    const next: ContextState = { ...contextRef.current, anchor: null, outlineEnabled: false };
-    contextRef.current = next;
-    setContext(next);
-    eosCounterRef.current = 0;
-    eosDismissedRef.current = false;
-    markDirty();
-
-    const message =
-      `锚点到光标已有 ${length} 字，超过上下文硬上限（约 ${limit} 字，按 1 字 = 1 token 估算），` +
-      "已自动退出锚点模式：锚点已清除、大纲已关闭（大纲文字仍保留在侧边栏，可重新开启并重设锚点），改用滑动窗口。";
-    flash("anchor", () => setAnchorNotice(message), () => setAnchorNotice(null), IMPORTANT_NOTICE_MS);
-  }
-
-  /**
    * 每次文本 / 光标 / 设置变化后调用：
-   *   ① 锚点模式下检查硬上限，超限就退出锚点模式；
-   *   ② 锚点模式生效时绝不启动滑窗；
-   *   ③ 其余情况按规则推进滑动窗口左边界。
+   *   ① 大纲段生效（正文从段起点开始）时绝不推进滑窗；段超硬上限时 promptArgsFor 已自行把锚点置空；
+   *   ② 其余情况按规则推进滑动窗口左边界。
    */
   function syncWindow(text: string, caret: number) {
     const s = settingsRef.current;
-    let args = promptArgsFor(text, caret, contextRef.current, s, windowStartRef.current);
-
-    if (isAnchorOverflow(args)) {
-      const limit = bodyHardLimit(s.modelContextLen, args.styleText, args.outlineText);
-      dropAnchorMode(caret - (args.anchorOffset ?? 0), limit);
-      args = promptArgsFor(text, caret, contextRef.current, s, windowStartRef.current);
-    }
-
-    const ctx = contextRef.current;
-    const outlineUsable = ctx.outlineEnabled && ctx.outlineText.trim().length > 0;
-    const anchorActive = outlineUsable && ctx.anchor !== null && ctx.anchor.offset <= caret;
-    // 只有光标位于锚点之后时才冻结滑窗，严格使用「锚点 → 光标」范围。
-    // 光标回到锚点之前时改用滑窗，并由 PromptBuilder 返回明确提示。
-    if (anchorActive) return;
+    const args = currentArgs(text, caret);
+    if (typeof args.anchorOffset === "number") return;
 
     const result = advanceSlidingWindow(
       text,
@@ -377,24 +529,54 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   }
 
   /* ════════════════════════════════════════════════════════════════
-     C. 候选请求：防抖 + 单飞 + 最新优先
-     ════════════════════════════════════════════════════════════════
-
-     为什么要「单飞」：AbortSignal 过不了 IPC，renderer 侧 abort 只是「不再等结果」，
-     主进程和 llama-server 并不知道，请求会在后端排队堆积。
-     所以这里保证：任何时刻最多 1 个请求在飞 + 最多 1 个任务排队（永远只保留最新的）。
-     后端若支持 cancelCandidates，则在新任务到来时顺手 abort 在飞请求，让后端尽早停下。 */
+     C. 候选请求（调度策略见 lib/candidateScheduler.ts）
+     ════════════════════════════════════════════════════════════════ */
 
   function cancelCandidateWork() {
-    if (candidateTimerRef.current !== null) {
-      window.clearTimeout(candidateTimerRef.current);
-      candidateTimerRef.current = null;
+    scheduler.cancel();
+    clearExpandTimer();
+    expander.clear();
+  }
+
+  function clearExpandTimer() {
+    if (expandTimerRef.current !== null) {
+      window.clearTimeout(expandTimerRef.current);
+      expandTimerRef.current = null;
     }
-    pendingJobRef.current = null;
-    if (inFlightRef.current) {
-      inFlightRef.current.abort();
-      inFlightRef.current = null;
-    }
+  }
+
+  /** 当前页的候选 → 展开项（按全局序号存结果，翻页不串）。 */
+  function currentPageItems(): ExpandItem[] {
+    return visibleCandidates.map((candidate, index) => ({ index: page * pageSize + index, text: candidate.text }));
+  }
+
+  /** 开始一轮展开：提示词就是候选那一份（前缀全部命中缓存），逐行解码。 */
+  function startExpansion(items: ExpandItem[]) {
+    if (items.length === 0 || !candidatePromptRef.current) return;
+    clearExpandTimer();
+    expander.start(candidatePromptRef.current, items);
+  }
+
+  /**
+   * 停笔后自动展开：候选就绪后（或在浮窗里按了方向键 / 翻页后）重新计时，
+   * 距最近一次操作满 expandIdleMs 且文本 / 光标仍未变，就展开当前页。
+   * 最小档 250 ms 在候选到达时通常已经过期 → 候选一出就展开（原「总是自动展开」）。
+   */
+  function armIdleExpansion() {
+    clearExpandTimer();
+    const s = settingsRef.current;
+    if (!s.expandEnabled || !s.expandAuto) return;
+    const text = contentRef.current;
+    const caret = selectionRef.current.start;
+    const elapsed = performance.now() - lastActivityRef.current;
+    const delay = Math.max(60, s.expandIdleMs - elapsed);
+    expandTimerRef.current = window.setTimeout(() => {
+      expandTimerRef.current = null;
+      if (compositionRef.current) return;
+      if (contentRef.current !== text || selectionRef.current.start !== caret) return;
+      if (performance.now() - lastActivityRef.current < s.expandIdleMs - 60) return;
+      startExpansion(pageItemsRef.current);
+    }, delay);
   }
 
   /** 关闭浮层（Esc / 失焦 / 开始组字 / 插入完成）。 */
@@ -408,8 +590,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     setGlobalIndex(0);
   }
 
-  /** 真正发出一次请求。 */
-  function runJob(job: CandidateJob) {
+  /** 真正发出一次请求（由 scheduler 调用）。 */
+  async function runJob(job: CandidateJob, controller: AbortController): Promise<void> {
     // 后端没就绪时不发请求，避免快速模式下每个按键都撞一次错误。
     if (!candidateSource.isDemo && backendStatusRef.current !== "ready") {
       setCandidateLoading(false);
@@ -419,8 +601,6 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       return;
     }
 
-    const controller = new AbortController();
-    inFlightRef.current = controller;
     setCandidateLoading(true);
     setCandidateOpen(true);
     setCandidateError(null);
@@ -442,8 +622,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     }
     lastPromptRef.current = built.prompt;
 
-    candidateSource
-      .provider(
+    try {
+      const result = await candidateSource.provider(
         {
           requestId: createRequestId(),
           prompt: built.prompt,
@@ -452,107 +632,65 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           mode: built.mode,
         },
         controller.signal,
-      )
-      .then((result) => {
-        // ── 竞态校验：任一不满足即视为过期，直接丢弃 ──
-        if (controller.signal.aborted || inFlightRef.current !== controller) return;
-        if (compositionRef.current) return;
-        if (contentRef.current !== job.text || selectionRef.current.start !== job.range.start) return;
+      );
+      // ── 竞态校验：任一不满足即视为过期，直接丢弃 ──
+      if (!scheduler.isCurrent(controller)) return;
+      if (compositionRef.current) return;
+      if (contentRef.current !== job.text || selectionRef.current.start !== job.range.start) return;
 
-        const sorted = [...result].sort(
-          (left, right) => (right.logit ?? Math.log(right.prob || 1e-9)) - (left.logit ?? Math.log(left.prob || 1e-9)),
-        );
-
-        const s = settingsRef.current;
-
-        // 先对**全部**候选（含终止符）软化一次：终止符的概率要和其它词放在同一把尺子上比，
-        // 才能用「≥ 10%」这样的阈值；单独拿它的原始 softmax 值没有意义。
-        const softenedAll = applySoftening(sorted, s.softenTemperature);
-
-        // ── EOS 弱提醒 ──
-        // 三道门：① 只在大纲模式（built.mode 含大纲）才计数——纯续写 / 仅风格没有「本章该收尾」的概念；
-        //         ② 终止符要排进前 eosScanTopN；③ 软化后概率 ≥ eosMinProb。
-        const outlineMode = built.mode === "outline" || built.mode === "full";
-        if (outlineMode) {
-          const hitEos = softenedAll
-            .slice(0, s.eosScanTopN)
-            .some((item) => item.isEos && item.prob >= s.eosMinProb);
-          if (hitEos) {
-            eosCounterRef.current += 1;
-            if (eosCounterRef.current >= s.eosThreshold && !eosDismissedRef.current) setToastVisible(true);
-          } else {
-            eosCounterRef.current = 0;
-          }
-        } else {
-          eosCounterRef.current = 0;
-        }
-
-        // 终止符不展示给作者；去掉它之后再软化一次，让展示的百分比加起来是 100%。
-        const usable = applySoftening(
-          sorted.filter((item) => !item.isEos && item.text.length > 0),
-          s.softenTemperature,
-        );
-
-        // ── 多样化重排 ──
-        // 对软化后的候选做轻量多样化重排：降低纯标点/空格候选的排名，
-        // 惩罚与前排候选字面相似的项目，以及同首字扎堆。
-        // 不删除候选、不修改原始 prob/logit，windowSize 以外保持模型原始顺序。
-        const diversified = diversifyCandidates(usable);
-        setCandidateList(diversified);
-        setGlobalIndex(0);
-        setCandidateLoading(false);
-
-        if (usable.length === 0) {
-          // 模型把结束符排在了第一位（常见于刚推进滑窗、或一句话刚好写完）。
-          // 这不是故障：继续写、甚至改一个字，下次请求通常就正常了。
-          setCandidateNotice("模型暂时没有推荐候选，继续写就好。");
-          setCandidateOpen(true);
-          // 普通模式下浮层不常驻：显示三秒后自动收起（4000）
-          if (!job.quick) {
-            flash(
-              "empty-notice",
-              () => {},
-              () => { setCandidateOpen(false); setCandidateNotice(null); },
-              3000,
-            );
-          }
-        } else {
-          setCandidateNotice(null);
-          setCandidateOpen(true);
-        }
-
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted || inFlightRef.current !== controller) return;
-        setCandidateLoading(false);
-        setCandidateList([]);
-        setCandidateError(error instanceof Error ? error.message : "候选请求失败，请稍后再试。");
-        setCandidateOpen(true);
-      })
-      .finally(() => {
-        if (inFlightRef.current === controller) inFlightRef.current = null;
-        // 只有在「现在没有别的请求在飞」时才启动排队任务，保证单飞。
-        if (inFlightRef.current === null) {
-          const next = pendingJobRef.current;
-          if (next) {
-            pendingJobRef.current = null;
-            runJobRef.current(next);
-          }
-        }
+      const s = settingsRef.current;
+      const { candidates, eosHit } = postprocessCandidates(result, {
+        softenTemperature: s.softenTemperature,
+        eosScanTopN: s.eosScanTopN,
+        eosMinProb: s.eosMinProb,
+        outlineMode: built.mode === "outline" || built.mode === "full",
       });
-  }
-  runJobRef.current = runJob;
 
-  /** 入队：在飞则排队（覆盖旧排队任务），否则立刻发。 */
-  function enqueueJob(job: CandidateJob) {
-    if (inFlightRef.current) {
-      pendingJobRef.current = job;
-      // 后端支持取消时顺手停掉在飞请求；finally 会接着跑排队任务。
-      if (candidateSource.supportsCancel) inFlightRef.current.abort();
-      return;
+      // ── EOS 弱提醒：连续命中 eosThreshold 次才弹，关掉过一次就本片段内不再弹 ──
+      if (eosHit) {
+        eosCounterRef.current += 1;
+        if (eosCounterRef.current >= s.eosThreshold && !eosDismissedRef.current) setToastVisible(true);
+      } else {
+        eosCounterRef.current = 0;
+      }
+
+      setCandidateList(candidates);
+      candidatePromptRef.current = built.prompt;
+      setGlobalIndex(0);
+      setCandidateLoading(false);
+
+      if (candidates.length === 0) {
+        // 模型把结束符排在了第一位（常见于刚推进滑窗、或一句话刚好写完）。
+        // 这不是故障：继续写、甚至改一个字，下次请求通常就正常了。
+        setCandidateNotice("模型暂时没有推荐候选，继续写就好。");
+        setCandidateOpen(true);
+        // 普通模式下浮层不常驻：显示三秒后自动收起
+        if (!job.quick) {
+          flash(
+            "empty-notice",
+            () => {},
+            () => {
+              setCandidateOpen(false);
+              setCandidateNotice(null);
+            },
+            3000,
+          );
+        }
+      } else {
+        setCandidateNotice(null);
+        setCandidateOpen(true);
+        // 停笔后自动展开（含最小档「候选一出就展开」）
+        armIdleExpansion();
+      }
+    } catch (error: unknown) {
+      if (!scheduler.isCurrent(controller)) return;
+      setCandidateLoading(false);
+      setCandidateList([]);
+      setCandidateError(error instanceof Error ? error.message : "候选请求失败，请稍后再试。");
+      setCandidateOpen(true);
     }
-    runJob(job);
   }
+  scheduler.setRunner(runJob);
 
   /**
    * 排程一次候选查询。
@@ -560,16 +698,15 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
    *   快速模式：浮层常驻、零延迟；旧候选保留并半透明，直到新结果替换它，避免闪烁。
    */
   function scheduleCandidates(text: string, range: SelectionRange, quickOverride?: boolean) {
-    if (candidateTimerRef.current !== null) {
-      window.clearTimeout(candidateTimerRef.current);
-      candidateTimerRef.current = null;
-    }
-    pendingJobRef.current = null;
     setCandidateError(null);
+    // 文本 / 光标变了，旧的短句与候选不再对应
+    clearExpandTimer();
+    expander.clear();
 
     // 输入法组字期间绝不请求（见 F 节）。
     // 开启「浮窗常驻」时浮窗保持原样（会被淡化），否则收起。
     if (compositionRef.current) {
+      scheduler.cancel();
       if (settingsRef.current.keepPopover) setCandidateLoading(false);
       else setCandidateOpen(false);
       return;
@@ -586,64 +723,35 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       setCandidateLoading(false);
     }
 
-    const job: CandidateJob = { text, range, quick };
-    const wait = quick ? 0 : settingsRef.current.triggerDelay;
-    candidateTimerRef.current = window.setTimeout(() => {
-      candidateTimerRef.current = null;
-      enqueueJob(job);
-    }, wait);
+    scheduler.schedule({ text, range, quick }, quick ? 0 : settingsRef.current.triggerDelay);
   }
 
   /* ════════════════════════════════════════════════════════════════
      D. 文本写入、锚点同步、撤销重做
      ════════════════════════════════════════════════════════════════ */
 
-  function markDirty() {
-    saveVersionRef.current += 1;
-    // 上次保存失败也照样置为 dirty：下一次自动保存会重试，失败会再次显示「保存失败」。
-    setSaveStatus("dirty");
-  }
-
-  /** 记录一帧撤销快照。连续同类编辑（打字/删除）在 850ms 内会合并成一步。 */
-  function recordHistory(kind: string, groupable = false) {
-    const now = Date.now();
-    const last = lastEditGroupRef.current;
-    const startNewGroup = !groupable || !last || last.kind !== kind || now - last.time > 850;
-
-    if (startNewGroup) {
-      undoStackRef.current.push({
-        text: contentRef.current,
-        start: selectionRef.current.start,
-        end: selectionRef.current.end,
-      });
-      if (undoStackRef.current.length > 400) undoStackRef.current.shift();
-    }
-    lastEditGroupRef.current = groupable ? { kind, time: now } : null;
-    redoStackRef.current = [];
-    setHistoryRevision((n) => n + 1);
-  }
-
   /**
    * 统一的「写入正文」入口。
    * 除了更新 state/ref，还负责：锚点穿过这次编辑、滑动窗口左边界平移与推进、硬上限检查。
    */
-  function setEditorDocument(nextText: string, nextSelection: SelectionRange) {
+  /**
+   * @param mapOffset 程序化改动（分章 / 重编号 / 改名）给出的精确偏移映射；没有就用 diff 区间 + 指纹推断。
+   */
+  function setEditorDocument(nextText: string, nextSelection: SelectionRange, mapOffset?: (offset: number) => number) {
     const previousText = contentRef.current;
 
     if (previousText !== nextText) {
       const span = diffEditSpan(previousText, nextText);
 
-      // ① 锚点：先按偏移平移，再用指纹校验 / 重找
-      const currentAnchor = contextRef.current.anchor;
-      if (currentAnchor) {
-        const result = mapAnchorThroughEdit(currentAnchor, nextText, span);
-        if (
-          result.anchor.offset !== currentAnchor.offset ||
-          result.anchor.fingerprint !== currentAnchor.fingerprint
-        ) {
-          const nextAnchor = result.anchor;
-          contextRef.current = { ...contextRef.current, anchor: nextAnchor }; // 立即同步，供本次后续逻辑使用
-          setContext((prev) => ({ ...prev, anchor: nextAnchor }));
+      // ① 大纲段起点：先按偏移平移，再用指纹校验 / 重找
+      const segments = contextRef.current.outlineSegments;
+      if (segments.length > 0) {
+        const result = mapOffset
+          ? { segments: remapSegments(segments, nextText, mapOffset), changed: true, notice: null }
+          : mapSegmentsThroughEdit(segments, nextText, span);
+        if (result.changed) {
+          contextRef.current = { ...contextRef.current, outlineSegments: result.segments }; // 立即同步，供本次后续逻辑使用
+          setContext((prev) => ({ ...prev, outlineSegments: result.segments }));
         }
         const notice = result.notice;
         if (notice) flash("anchor", () => setAnchorNotice(notice), () => setAnchorNotice(null));
@@ -656,6 +764,9 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
         setWindowStart(mappedWindow);
       }
       if (span.delta > 0) writtenSinceUpdateRef.current += span.delta;
+
+      // ③ 纠错标记随编辑平移（被改到的直接消失）
+      proofreader.onEdit(span);
     }
 
     contentRef.current = nextText;
@@ -664,7 +775,7 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     setSelection(nextSelection);
     markDirty();
 
-    // ③ 滑动窗口推进判定 + 锚点硬上限检查
+    // ④ 滑动窗口推进判定 + 锚点硬上限检查
     syncWindow(nextText, nextSelection.start);
   }
 
@@ -676,9 +787,10 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     nextText: string,
     nextSelection: SelectionRange,
     kind: string,
+    mapOffset?: (offset: number) => number,
   ) {
-    recordHistory(kind);
-    setEditorDocument(nextText, nextSelection);
+    history.record(kind);
+    setEditorDocument(nextText, nextSelection, mapOffset);
     cancelCandidateWork();
 
     // requestAnimationFrame：等 React 把新值刷进 DOM 之后再设置光标，否则会被覆盖。
@@ -705,29 +817,13 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   }
 
   function undo() {
-    const previous = undoStackRef.current.pop();
-    if (!previous) return;
-    redoStackRef.current.push({
-      text: contentRef.current,
-      start: selectionRef.current.start,
-      end: selectionRef.current.end,
-    });
-    lastEditGroupRef.current = null;
-    setHistoryRevision((n) => n + 1);
-    restoreSnapshot(previous);
+    const previous = history.undo();
+    if (previous) restoreSnapshot(previous);
   }
 
   function redo() {
-    const next = redoStackRef.current.pop();
-    if (!next) return;
-    undoStackRef.current.push({
-      text: contentRef.current,
-      start: selectionRef.current.start,
-      end: selectionRef.current.end,
-    });
-    lastEditGroupRef.current = null;
-    setHistoryRevision((n) => n + 1);
-    restoreSnapshot(next);
+    const next = history.redo();
+    if (next) restoreSnapshot(next);
   }
 
   /**
@@ -764,49 +860,13 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       outlineText: ctx.outlineText,
       styleEnabled: ctx.styleEnabled,
       outlineEnabled: ctx.outlineEnabled,
-      anchor: ctx.anchor,
+      outlineSegments: ctx.outlineSegments,
+      // 旧字段：写段落后由主进程清空，这里显式给空值
+      anchor: null,
+      chapterOutlines: undefined,
+      materials: materialsRef.current,
     };
   }
-
-  /**
-   * 保存始终以文稿 id 为目标，不再调用旧的全局 currentPath 接口。
-   * 同时来的自动保存、手动保存与返回首页会共享一个在飞 Promise；期间又改了正文，
-   * 则等它结束后继续保存最新版本，直到落盘版本与编辑器版本一致。
-   */
-  async function performSave(): Promise<boolean> {
-    if (saveInFlightRef.current) {
-      const previousSucceeded = await saveInFlightRef.current;
-      if (!previousSucceeded) return false;
-      if (savedVersionRef.current === saveVersionRef.current) return true;
-    }
-    const version = saveVersionRef.current;
-    if (version === savedVersionRef.current) return true;
-
-    const payload = buildPayload();
-    setSaveStatus("saving");
-    const operation = (async () => {
-      try {
-        const entry = await onSave(payload);
-        savedVersionRef.current = version;
-        // 主进程如因重名调整了标题，让编辑器显示实际保存的名字。
-        if (version === saveVersionRef.current && entry.title !== titleRef.current) {
-          titleRef.current = entry.title;
-          setTitle(entry.title);
-        }
-        setSaveStatus(version === saveVersionRef.current ? "saved" : "dirty");
-        return true;
-      } catch {
-        setSaveStatus("error");
-        return false;
-      }
-    })();
-    saveInFlightRef.current = operation;
-    const succeeded = await operation;
-    if (saveInFlightRef.current === operation) saveInFlightRef.current = null;
-    if (!succeeded) return false;
-    return savedVersionRef.current === saveVersionRef.current ? true : performSave();
-  }
-  performSaveRef.current = performSave;
 
   /**
    * 导出 / 另存为 .txt。
@@ -814,9 +874,10 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
    */
   function exportTxt() {
     const payload = buildPayload();
-    const saveAs = window.api?.saveDocumentAs;
-    if (saveAs) {
-      void saveAs(payload)
+    const api = platform.api;
+    if (api) {
+      void api
+        .saveDocumentAs(payload)
         .then((result) => {
           if (result) setFileBanner({ kind: "info", text: "已导出一份 TXT 副本；文库中当前文稿的保存位置不变。" });
         })
@@ -848,6 +909,25 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       return;
     }
     onBack();
+  }
+
+  /** 切卷 / 新建卷与返回首页同一套流程：先把当前卷保存成功，再把控制权交给 App。 */
+  async function leaveAfterSave(next: () => Promise<void>) {
+    if (returning) return;
+    setReturning(true);
+    closeCandidates();
+    const succeeded = await performSave();
+    if (!succeeded) {
+      setFileBanner({ kind: "error", text: "保存失败，已留在当前卷。请先保存或导出 TXT 副本再重试。" });
+      setReturning(false);
+      return;
+    }
+    try {
+      await next();
+    } catch (error) {
+      setFileBanner({ kind: "error", text: error instanceof Error ? error.message : "操作失败" });
+      setReturning(false);
+    }
   }
 
   /* ════════════════════════════════════════════════════════════════
@@ -893,7 +973,7 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       const finalText = editor.value;
       const finalSelection = { start: editor.selectionStart, end: editor.selectionEnd };
       if (finalText !== contentRef.current) {
-        recordHistory("typing", true);
+        history.record("typing", true);
         setEditorDocument(finalText, finalSelection);
       } else {
         selectionRef.current = finalSelection;
@@ -913,6 +993,9 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   const page = Math.min(Math.floor(globalIndex / pageSize), pageCount - 1);
   const visibleCandidates = candidateList.slice(page * pageSize, page * pageSize + pageSize);
   const localIndex = globalIndex - page * pageSize;
+  useLayoutEffect(() => {
+    pageItemsRef.current = visibleCandidates.map((candidate, index) => ({ index: page * pageSize + index, text: candidate.text }));
+  });
 
   /** 在当前光标处插入一个候选词（整体作为一次可撤销操作）。 */
   function insertCandidateText(text: string) {
@@ -924,10 +1007,12 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     applyProgrammaticEdit(nextText, { start: caret, end: caret }, "candidate");
   }
 
+  /** 接受一行：已展开（哪怕只流出一半）就插整句，否则插词。 */
   function pickCandidate(indexInPage: number) {
     const candidate = visibleCandidates[indexInPage];
     if (!candidate) return;
-    insertCandidateText(candidate.text);
+    const row = expander.rows[page * pageSize + indexInPage];
+    insertCandidateText(candidate.text + (row?.text ?? ""));
   }
 
   /** 随机取词：按软化概率从全部候选里采样一个（轻量「自回归」体验）。 */
@@ -948,6 +1033,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       setPeekActive(false);
     }
   }, []);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
   /** 启动穿透键的长按计时（只启动一次，按键自动重复时不重复启动）。 */
   function startPeekTimer(repeat: boolean) {
@@ -1039,25 +1126,41 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       closeCandidates();
       return;
     }
+    // 浮窗内的浏览也是「操作」：停笔自动展开重新计时。换到别的页时停掉正在跑的一轮（已完成的行保留），
+    // 到点只补目标页还没展开的行；留在本页则只在本页还有没展开的行时才计时。
+    const noteBrowsing = (nextGlobalIndex: number) => {
+      lastActivityRef.current = performance.now();
+      if (candidateLoading) return;
+      const nextPage = Math.floor(nextGlobalIndex / pageSize);
+      if (nextPage !== page && expander.running) expander.cancel();
+      else if (expander.running) return;
+      const items = candidateList
+        .slice(nextPage * pageSize, (nextPage + 1) * pageSize)
+        .map((candidate, index) => ({ index: nextPage * pageSize + index, text: candidate.text }));
+      if (expander.hasPending(items)) armIdleExpansion();
+    };
     if (event.key === "PageDown") {
       event.preventDefault();
-      setGlobalIndex(Math.min(page + 1, pageCount - 1) * pageSize);
+      const next = Math.min(page + 1, pageCount - 1) * pageSize;
+      setGlobalIndex(next);
+      noteBrowsing(next);
       return;
     }
     if (event.key === "PageUp") {
       event.preventDefault();
-      setGlobalIndex(Math.max(page - 1, 0) * pageSize);
+      const next = Math.max(page - 1, 0) * pageSize;
+      setGlobalIndex(next);
+      noteBrowsing(next);
       return;
     }
     if (candidateList.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      setGlobalIndex((current) => {
-        const next = current + direction;
-        if (next < 0) return candidateList.length - 1;
-        if (next >= candidateList.length) return 0;
-        return next;
-      });
+      let next = globalIndex + direction;
+      if (next < 0) next = candidateList.length - 1;
+      if (next >= candidateList.length) next = 0;
+      setGlobalIndex(next);
+      noteBrowsing(next);
       return;
     }
     const ready = candidateList.length > 0 && !candidateLoading;
@@ -1068,7 +1171,17 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     }
     if (ready && matchesSampleKey(event.key, s.sampleKey)) {
       event.preventDefault();
-      sampleCandidate();
+      if (!s.expandEnabled) {
+        sampleCandidate();
+        return;
+      }
+      // 开了短句展开：短按在 keyup 里随机取词，按住 peekHoldMs 则展开当前页
+      if (event.repeat || sampleHoldTimerRef.current !== null) return;
+      const items = currentPageItems();
+      sampleHoldTimerRef.current = window.setTimeout(() => {
+        sampleHoldTimerRef.current = null;
+        startExpansion(items);
+      }, s.peekHoldMs);
       return;
     }
     if (ready && !event.altKey && !event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
@@ -1083,6 +1196,14 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   /** keyup：穿透键松开。Tab 短按（长按计时器还没到）= 补插入一个制表符。 */
   function handleEditorKeyUp(event: KeyboardEvent<HTMLTextAreaElement>) {
     const s = settingsRef.current;
+    if (matchesSampleKey(event.key, s.sampleKey)) {
+      if (sampleHoldTimerRef.current !== null) {
+        window.clearTimeout(sampleHoldTimerRef.current);
+        sampleHoldTimerRef.current = null;
+        if (candidateOpen && candidateList.length > 0 && !candidateLoading) sampleCandidate();
+      }
+      return;
+    }
     if (event.key !== s.peekKey) return;
     const shortPress = peekTimerRef.current !== null;
     releasePeek();
@@ -1098,7 +1219,7 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     const nextSelection = { start: editor.selectionStart, end: editor.selectionEnd };
     const inputType = (event.nativeEvent as InputEvent).inputType ?? "";
 
-    recordHistory(inputType.startsWith("delete") ? "delete" : "typing", true);
+    history.record(inputType.startsWith("delete") ? "delete" : "typing", true);
     setEditorDocument(nextText, nextSelection);
 
     if (!compositionRef.current) scheduleCandidates(nextText, nextSelection);
@@ -1107,10 +1228,11 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   function handleSelectionChange(next: SelectionRange) {
     const previous = selectionRef.current;
     if (previous.start === next.start && previous.end === next.end) return;
+    lastActivityRef.current = performance.now();
 
     selectionRef.current = next;
     setSelection(next);
-    lastEditGroupRef.current = null;
+    history.breakGroup();
     syncWindow(contentRef.current, next.start);
     if (!compositionRef.current) scheduleCandidates(contentRef.current, next);
   }
@@ -1156,7 +1278,7 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
         openSearchRef.current();
       } else if (key === "s") {
         event.preventDefault();
-        void performSaveRef.current();
+        void saveRef.current();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1177,83 +1299,27 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
   }, [releasePeek]);
 
   /* ── 浮层定位（镜像 div 测量光标像素坐标） ── */
-  const updatePositionRef = useRef<(() => void) | null>(null);
-
-  useLayoutEffect(() => {
-    if (!candidateOpen) return;
-
-    const updatePosition = () => {
-      const editor = editorRef.current;
-      const mirror = mirrorRef.current;
-      const panel = panelRef.current;
-      if (!editor || !mirror || !panel) return;
-
-      const point = measureCaretPoint(editor, mirror, contentRef.current, selectionRef.current.start);
-      if (!point) return;
-
-      const bounds = panel.getBoundingClientRect();
-      const edge = 14;
-      const footerRoom = 62;
-      let left = point.left;
-      let top = point.bottom + 8;
-
-      // 右边放不下就翻到左侧
-      if (left + bounds.width > window.innerWidth - edge) left = point.left - bounds.width;
-      left = Math.max(edge, Math.min(left, window.innerWidth - bounds.width - edge));
-
-      // 下边放不下就翻到光标上方
-      if (top + bounds.height > window.innerHeight - footerRoom) top = point.top - bounds.height - 8;
-      top = Math.max(edge, Math.min(top, window.innerHeight - bounds.height - edge));
-
-      setCandidatePosition((prev) =>
-        prev && Math.abs(prev.left - left) < 1 && Math.abs(prev.top - top) < 1 ? prev : { left, top },
-      );
-    };
-
-    updatePosition();
-    updatePositionRef.current = updatePosition;
-    window.addEventListener("resize", updatePosition);
-    return () => {
-      updatePositionRef.current = null;
-      window.removeEventListener("resize", updatePosition);
-    };
-  }, [candidateOpen, candidateList, candidateLoading, candidateError, content, selection, settings.fontSize, page]);
-
   // 自动保存：开关 + 周期都可配。关掉开关后只能手动保存（顶部按钮或 Ctrl+S）。
   useEffect(() => {
     if (!autoSaveEnabled || saveStatus !== "dirty" || isComposing) return;
     const timer = window.setTimeout(() => {
-      void performSaveRef.current();
+      void saveRef.current();
     }, settings.autoSaveInterval);
     return () => window.clearTimeout(timer);
-  }, [autoSaveEnabled, saveStatus, isComposing, settings.autoSaveInterval]);
+  }, [autoSaveEnabled, saveStatus, isComposing, settings.autoSaveInterval, saveRef]);
 
-  // 关窗前落盘：浏览器用 beforeunload（localStorage 是同步的，来得及）；
-  // Electron 由主进程发 flush 请求，renderer 保存完回 confirmClose。
-  useEffect(() => {
-    const onBeforeUnload = () => {
-      if (saveVersionRef.current !== savedVersionRef.current) void performSaveRef.current();
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    const unsubscribe = window.api?.onFlushRequest?.(() => {
-      void performSaveRef.current().then((saved) => {
-        if (saved) window.api?.confirmClose?.();
-      });
-    });
-    return () => {
-      window.removeEventListener("beforeunload", onBeforeUnload);
-      if (typeof unsubscribe === "function") unsubscribe();
-    };
-  }, []);
+  // 关窗前落盘：向全局注册表登记「保存当前文稿」；订阅主进程 flush 请求的只有根组件一处。
+  useEffect(() => registerFlusher(() => saveRef.current()), [saveRef]);
 
   // 在首页卸载编辑器时取消候选计时与请求，旧候选不能回写到另一篇文稿。
-  useEffect(() => () => {
-    if (candidateTimerRef.current !== null) window.clearTimeout(candidateTimerRef.current);
-    inFlightRef.current?.abort();
-    pendingJobRef.current = null;
-    flashTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    flashTimersRef.current.clear();
-  }, []);
+  useEffect(() => {
+    const timers = flashTimersRef.current;
+    return () => {
+      scheduler.cancel();
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
+    };
+  }, [scheduler]);
 
   // 高亮层要跟着 textarea 一起滚动，否则背景会和文字错位。
   function syncHighlightScroll() {
@@ -1270,9 +1336,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
 
   const searchMatches = useMemo(() => findMatches(content, searchQuery), [content, searchQuery]);
   const safeMatchIndex = searchMatches.length === 0 ? -1 : Math.min(activeMatchIndex, searchMatches.length - 1);
-  const characterCount = useMemo(() => Array.from(content.replace(/\s/g, "")).length, [content]);
-  const canUndo = useMemo(() => undoStackRef.current.length > 0, [historyRevision]);
-  const canRedo = useMemo(() => redoStackRef.current.length > 0, [historyRevision]);
+  const characterCount = useMemo(() => countChars(content), [content]);
+  const { canUndo, canRedo } = history;
 
   function replaceCurrentMatch() {
     const match = searchMatches[safeMatchIndex];
@@ -1295,8 +1360,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     contextRef.current = { ...contextRef.current, [key]: value };
     setContext((prev) => ({ ...prev, [key]: value }));
     markDirty();
-    // 大纲内容或锚点变了 = 进入新一段语境，EOS 提醒重新计数。
-    if (key === "outlineText" || key === "anchor") {
+    // 大纲段变了 = 进入新一段语境，EOS 提醒重新计数。
+    if (key === "outlineSegments") {
       eosCounterRef.current = 0;
       eosDismissedRef.current = false;
     }
@@ -1309,30 +1374,371 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     }
   }
 
-  /** 「锚定本章起点」：对齐到光标所在段落的段首，并记录指纹。 */
-  function anchorHere() {
-    const text = contentRef.current;
-    const caret = selectionRef.current.start;
-    const offset = snapAnchorOffset(text, caret);
-    updateContext("anchor", { offset, fingerprint: makeFingerprint(text, offset) });
-    if (offset !== caret) {
-      flash("anchor", () => setAnchorNotice("锚点已自动对齐到本段段首。"), () => setAnchorNotice(null), 4000);
+  /* ── 大纲段（lib/outline.ts） ── */
+
+  function setSegments(next: typeof context.outlineSegments) {
+    updateContext("outlineSegments", sortSegments(next));
+  }
+
+  /** 写某张卡的文字；隐式的空章首段写了字才真正建段。 */
+  function setSegmentText(resolved: ResolvedSegment, text: string) {
+    const segments = contextRef.current.outlineSegments;
+    if (resolved.segment) {
+      const id = resolved.segment.id;
+      setSegments(segments.map((segment) => (segment.id === id ? { ...segment, text } : segment)));
+      return;
+    }
+    if (!text) return;
+    const created = createSegment(contentRef.current, parseChapters(contentRef.current), resolved.chapter.bodyStart, text);
+    setSegments([...segments, created]);
+  }
+
+  function setSegmentInject(resolved: ResolvedSegment, inject: boolean) {
+    const segments = contextRef.current.outlineSegments;
+    if (resolved.segment) {
+      const id = resolved.segment.id;
+      setSegments(segments.map((segment) => (segment.id === id ? { ...segment, inject } : segment)));
+    } else if (!inject) {
+      // 空章首段也可以先关掉：建一个空段记录开关
+      const created = createSegment(contentRef.current, parseChapters(contentRef.current), resolved.chapter.bodyStart);
+      setSegments([...segments, { ...created, inject }]);
     }
   }
 
-  /** 把光标移到锚点，方便作者确认锚点位置。 */
-  function locateAnchor() {
-    const anchor = contextRef.current.anchor;
-    const editor = editorRef.current;
-    if (!anchor || !editor) return;
-    editor.focus();
-    editor.setSelectionRange(anchor.offset, anchor.offset);
-    handleSelectionChange({ start: anchor.offset, end: anchor.offset });
+  /** 右键「从这里新起大纲段」/ 面板「在光标处新起一段」：起点 = 光标所在段落段首；已经是某段起点就只聚焦那张卡。 */
+  function addSegmentAtCaret() {
+    const text = contentRef.current;
+    const index = parseChapters(text);
+    const caret = selectionRef.current.start;
+    const layout = layoutOutline(text, index, contextRef.current.outlineSegments);
+    const existing = segmentStartingAt(text, layout, index, caret);
+    setWorkbenchTab("outline");
+    if (existing?.segment) {
+      setOutlineFocusKey(segmentKey(existing));
+      return;
+    }
+    const created = createSegment(text, index, caret);
+    setSegments([...contextRef.current.outlineSegments, created]);
+    setOutlineFocusKey(created.id);
   }
 
-  function clearAnchor() {
-    updateContext("anchor", null);
-    setAnchorNotice(null);
+  /** 把某段的起点改到光标所在段落；那里已经是别的段起点就不动。 */
+  function moveSegmentToCaret(resolved: ResolvedSegment) {
+    if (!resolved.segment) return;
+    const id = resolved.segment.id;
+    const text = contentRef.current;
+    const index = parseChapters(text);
+    const caret = selectionRef.current.start;
+    const layout = layoutOutline(text, index, contextRef.current.outlineSegments);
+    const occupied = segmentStartingAt(text, layout, index, caret);
+    if (occupied?.segment && occupied.segment.id !== id) {
+      flash("anchor", () => setAnchorNotice("光标所在段落已经是另一段大纲的起点。"), () => setAnchorNotice(null), 4000);
+      return;
+    }
+    const moved = createSegment(text, index, caret);
+    setSegments(contextRef.current.outlineSegments.map((segment) => (segment.id === id ? { ...segment, anchor: moved.anchor } : segment)));
+  }
+
+  /** 删除一段：去掉边界，正文归入上一段；merge = 大纲文字接到上一段末尾（上一段是空章首则就地建段）。 */
+  function removeSegment(resolved: ResolvedSegment, merge: boolean) {
+    if (!resolved.segment || resolved.isHead) return;
+    const id = resolved.segment.id;
+    const text = contentRef.current;
+    const index = parseChapters(text);
+    const layout = layoutOutline(text, index, contextRef.current.outlineSegments);
+    const list = layout.byChapter[resolved.chapter.index];
+    const previous = list[resolved.ordinal - 2] ?? null;
+    let segments = contextRef.current.outlineSegments.filter((segment) => segment.id !== id);
+    const carried = resolved.segment.text.trim();
+    if (merge && previous && carried) {
+      if (previous.segment) {
+        const prevId = previous.segment.id;
+        segments = segments.map((segment) =>
+          segment.id === prevId ? { ...segment, text: segment.text.trim() ? `${segment.text.trimEnd()}\n${carried}` : carried } : segment,
+        );
+      } else {
+        segments = [...segments, createSegment(text, index, previous.chapter.bodyStart, carried)];
+      }
+    }
+    setSegments(segments);
+  }
+
+  function locateSegment(resolved: ResolvedSegment) {
+    jumpToOffset(resolved.start);
+  }
+
+  /* ── 章节 ── */
+
+  /** 把光标移到某一章的正文起点并滚到可见处。 */
+  function jumpToChapter(chapter: Chapter) {
+    jumpToOffset(chapter.bodyStart);
+  }
+
+  /** 把光标放到某个偏移并让该行出现在视口上部（目录跳转、纠错定位共用）。 */
+  function jumpToOffset(target: number) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const offset = Math.max(0, Math.min(target, contentRef.current.length));
+    editor.focus();
+    editor.setSelectionRange(offset, offset);
+    handleSelectionChange({ start: offset, end: offset });
+    // 让该行出现在视口上部：先滚到底再定位，浏览器会把光标行滚进视野
+    window.requestAnimationFrame(() => {
+      const point = caretTopInEditor(editor, offset);
+      if (point !== null) editor.scrollTop = Math.max(0, point - 80);
+      popoverRef.current?.relayout();
+    });
+  }
+
+  /** 估算某偏移所在行在 textarea 内容坐标系里的 top（粗略：按换行数 × 行高）。 */
+  function caretTopInEditor(editor: HTMLTextAreaElement, offset: number): number | null {
+    const lineHeight = Number.parseFloat(window.getComputedStyle(editor).lineHeight);
+    if (!Number.isFinite(lineHeight)) return null;
+    let lines = 0;
+    const text = contentRef.current;
+    for (let i = 0; i < offset && i < text.length; i += 1) if (text.charCodeAt(i) === 10) lines += 1;
+    return lines * lineHeight;
+  }
+
+  /**
+   * 在光标处（段首对齐）或文末插入 `--第N章--` 标记行。
+   * 序号按文中位置取（前面有 2 章就是第 3 章），后面已编号的章节顺延；连同顺延一起算一步撤销。
+   */
+  function insertChapterAt(where: "caret" | "end") {
+    const text = contentRef.current;
+    const offset = where === "end" ? text.length : selectionRef.current.start;
+    const inserted = insertChapterMark(text, offset, defaultChapterTitleAt(parseChapters(text), offset));
+    const renumbered = renumberChapters(inserted.text);
+    const caret = renumbered.map(inserted.caret);
+    // 大纲段：插在段首的标记把那一段推到新章里，起点正好在插入点的段跟着走（成为新章的章首段）
+    const span = diffEditSpan(text, inserted.text);
+    const mapOffset = (o: number) => renumbered.map(o >= span.changeStart ? o + span.delta : o);
+    applyProgrammaticEdit(renumbered.text, { start: caret, end: caret }, "chapter", mapOffset);
+    setChaptersOpen(true);
+  }
+
+  /** 面板里的「重新编号」：手动输入的标记序号乱了（1、2、6、3…）时一键按文中顺序重排。 */
+  function renumberAllChapters() {
+    const text = contentRef.current;
+    const renumbered = renumberChapters(text);
+    if (renumbered.text === text) return;
+    const caret = selectionRef.current;
+    applyProgrammaticEdit(renumbered.text, { start: renumbered.map(caret.start), end: renumbered.map(caret.end) }, "chapter-renumber", renumbered.map);
+  }
+
+  /** 改写某章的标记行。光标 / 标记行之后的大纲段起点按长度差平移（章首段锚在标记行上，不动）。 */
+  function renameChapter(chapter: Chapter, nextTitle: string) {
+    const text = contentRef.current;
+    const title = nextTitle.replace(/\n/g, " ");
+    const nextText = renameChapterMark(text, chapter, title);
+    if (nextText === null || nextText === text) return;
+    const delta = nextText.length - text.length;
+    const caret = selectionRef.current;
+    const shift = (offset: number) => (offset >= chapter.bodyStart ? Math.max(0, offset + delta) : offset);
+    history.record("chapter-rename", false);
+    setEditorDocument(nextText, { start: shift(caret.start), end: shift(caret.end) }, shift);
+  }
+
+  /** 标题区的「本章」输入框：改写光标所在章的标记行。 */
+  function renameCurrentChapter(nextTitle: string) {
+    renameChapter(chapterAt(parseChapters(contentRef.current), selectionRef.current.start), nextTitle);
+  }
+
+  /**
+   * 取消分章：删掉标记行，本章正文并入上一章，后面的章节序号前移；
+   * 该章的章首段落到原正文第一段上，成为上一章里的普通一段。
+   */
+  function removeChapter(chapter: Chapter) {
+    const text = contentRef.current;
+    const removed = removeChapterMark(text, chapter);
+    if (removed === null) return;
+    const delta = removed.length - text.length;
+    const caret = selectionRef.current;
+    const shift = (offset: number) =>
+      offset >= chapter.bodyStart ? Math.max(0, offset + delta) : Math.min(offset, chapter.markStart);
+    const renumbered = renumberChapters(removed);
+    history.record("chapter-remove", false);
+    setEditorDocument(
+      renumbered.text,
+      { start: renumbered.map(shift(caret.start)), end: renumbered.map(shift(caret.end)) },
+      (o) => renumbered.map(shift(o)),
+    );
+  }
+
+  /* ── 卷 ── */
+
+  function switchVolume(id: string) {
+    if (!onSwitchVolume) return;
+    void leaveAfterSave(() => onSwitchVolume(id));
+  }
+
+  function createVolume() {
+    if (!onCreateVolume) return;
+    void leaveAfterSave(() => onCreateVolume());
+  }
+
+  /* ── 素材 ── */
+
+  function updateMaterials(next: Materials) {
+    materialsRef.current = next;
+    setMaterials(next);
+    markDirty();
+  }
+
+  /* ── 右键菜单 ── */
+
+  function openContextMenu(event: MouseEvent<HTMLTextAreaElement>) {
+    event.preventDefault();
+    setContextMenu({ x: event.clientX, y: event.clientY, items: contextMenuItems() });
+  }
+
+  /** 通过浏览器原生输入路径插入文字（走 onChange，可撤销）；失败时手动写入。 */
+  function insertTextAtSelection(text: string) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    if (document.execCommand("insertText", false, text)) return;
+    const range = selectionRef.current;
+    const current = contentRef.current;
+    const nextText = current.slice(0, range.start) + text + current.slice(range.end);
+    const caret = range.start + text.length;
+    applyProgrammaticEdit(nextText, { start: caret, end: caret }, "paste");
+  }
+
+  /** 纠错「采纳」：引用还在原位才替换（随编辑平移过，不一致说明已被改动）。 */
+  function acceptIssue(issue: Issue) {
+    if (!issue.suggestion) return;
+    const range = issue.ranges[0];
+    const text = contentRef.current;
+    if (text.slice(range.start, range.end) !== issue.quote) {
+      proofreader.dismiss(issue);
+      setFileBanner({ kind: "error", text: "这处原文已经改过，没有采纳。" });
+      return;
+    }
+    const nextText = text.slice(0, range.start) + issue.suggestion + text.slice(range.end);
+    const caret = range.start + issue.suggestion.length;
+    applyProgrammaticEdit(nextText, { start: caret, end: caret }, "proofread-accept");
+  }
+
+  function locateIssue(issue: Issue) {
+    setWorkbenchTab("proofread");
+    jumpToOffset(issue.ranges[0].start);
+  }
+
+  function contextMenuItems(): ContextMenuItem[] {
+    const range = selectionRef.current;
+    const selected = contentRef.current.slice(range.start, range.end);
+    const hasSelection = selected.length > 0;
+    const copySelection = () => {
+      void navigator.clipboard.writeText(selected).catch(() => undefined);
+    };
+    return [
+      { id: "undo", label: "撤销", icon: "undo", shortcut: "Ctrl+Z", disabled: !canUndo, onSelect: undo },
+      { id: "redo", label: "重做", icon: "redo", shortcut: "Ctrl+Y", disabled: !canRedo, onSelect: redo },
+      {
+        id: "cut",
+        label: "剪切",
+        icon: "scissors",
+        shortcut: "Ctrl+X",
+        disabled: !hasSelection,
+        separator: true,
+        onSelect: () => {
+          copySelection();
+          insertTextAtSelection("");
+        },
+      },
+      { id: "copy", label: "复制", icon: "copy", shortcut: "Ctrl+C", disabled: !hasSelection, onSelect: copySelection },
+      {
+        id: "paste",
+        label: "粘贴",
+        icon: "clipboard",
+        shortcut: "Ctrl+V",
+        onSelect: () => {
+          void navigator.clipboard
+            .readText()
+            .then((text) => {
+              if (text) insertTextAtSelection(text.replace(/\r\n?/g, "\n"));
+            })
+            .catch(() => setFileBanner({ kind: "error", text: "无法读取剪贴板，请用 Ctrl+V 粘贴。" }));
+        },
+      },
+      {
+        id: "select-all",
+        label: "全选",
+        shortcut: "Ctrl+A",
+        onSelect: () => {
+          const editor = editorRef.current;
+          if (!editor) return;
+          editor.focus();
+          editor.select();
+          handleSelectionChange({ start: 0, end: contentRef.current.length });
+        },
+      },
+      {
+        id: "search",
+        label: hasSelection ? "查找选中文字" : "查找与替换",
+        icon: "search",
+        shortcut: "Ctrl+F",
+        separator: true,
+        onSelect: () => openSearchPanel(),
+      },
+      {
+        id: "candidates",
+        label: "立即取候选",
+        disabled: candidateLoading || !(candidateSource.isDemo || backendStatus === "ready"),
+        onSelect: () => scheduleCandidates(contentRef.current, selectionRef.current, true),
+      },
+      {
+        id: "expand",
+        label: expander.running ? "停止展开" : "把候选展开为短句",
+        disabled: !(candidateOpen && candidateList.length > 0 && !candidateLoading),
+        onSelect: () => {
+          if (expander.running) expander.cancel();
+          else startExpansion(currentPageItems());
+        },
+      },
+      { id: "chapter", label: "在此处分章", icon: "chapters", onSelect: () => insertChapterAt("caret") },
+      { id: "segment", label: "从这里新起大纲段", icon: "outline", onSelect: () => addSegmentAtCaret() },
+      {
+        id: "proofread",
+        label: "检查光标前的文字",
+        icon: "check",
+        disabled: !proofreader.available,
+        onSelect: () => {
+          setWorkbenchTab("proofread");
+          proofreader.run(true);
+        },
+      },
+      {
+        id: "consistency",
+        label: "校验这段的人设",
+        disabled: !proofreader.available || !proofreader.hasCharacters,
+        onSelect: () => {
+          setWorkbenchTab("proofread");
+          proofreader.runConsistency(true);
+        },
+      },
+      {
+        id: "character",
+        label: hasSelection ? `为「${selected.trim().slice(0, 8)}」建角色卡` : "打开角色面板",
+        icon: "person",
+        onSelect: () => {
+          setWorkbenchTab("characters");
+          if (hasSelection) {
+            const name = selected.trim().slice(0, 20);
+            if (name && !materialsRef.current.characters.some((c) => c.name === name)) {
+              updateMaterials({
+                ...materialsRef.current,
+                characters: [
+                  ...materialsRef.current.characters,
+                  { id: crypto.randomUUID(), name, aliases: [], group: "main", background: "", personality: "", appearance: "", extra: [], inject: true },
+                ],
+              });
+            }
+          }
+        },
+      },
+    ];
   }
 
   /** 「查看日志」：主进程若能用系统方式打开就不弹窗，否则把文本显示在弹窗里。 */
@@ -1352,22 +1758,59 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
     error: "保存失败",
   };
 
-  // 只有真正有大纲文字时才算启用大纲；空大纲与关闭大纲等价，不展示锚点或范围高亮。
-  const outlineActive = context.outlineEnabled && context.outlineText.trim().length > 0;
-  const anchorFallbackActive =
-    outlineActive && context.anchor !== null && selection.start < context.anchor.offset;
+  /* ── 大纲段：布局、光标所在段、是否在注入 ── */
+  const outlineLayout = useMemo(() => layoutOutline(content, chapterIndex, context.outlineSegments), [content, chapterIndex, context.outlineSegments]);
+  const currentSegment = useMemo(() => segmentAt(outlineLayout, chapterIndex, selection.start), [outlineLayout, chapterIndex, selection.start]);
+  const segmentInjecting = segmentInjects(currentSegment, selection.start, context.outlineEnabled);
 
-  // 大纲实际参与 prompt 时，给「本次真正送入模型的正文范围」加背景。
-  // 锚点之后高亮锚点段落至光标；光标在锚点前时高亮回退滑窗，不会标错锚点范围。
-  const highlightRange = outlineActive
-    ? { start: promptPreview.bodyStart, end: promptPreview.bodyEnd }
-    : null;
+  // 高亮层装饰：每个大纲段起点一条横线（光标所在段用强调色、其余淡）。纠错等功能只需往这个数组里追加。
+  const decorations = useMemo<Decoration[]>(() => {
+    const list: Decoration[] = [];
+    const currentKey = segmentKey(currentSegment);
+    for (const item of outlineLayout.all) {
+      if (!item.segment) continue;
+      const active = segmentKey(item) === currentKey;
+      list.push({
+        start: item.start,
+        end: item.start,
+        kind: "anchor",
+        tone: active ? (segmentInjecting ? "manual" : "chapter") : "idle",
+        label: `大纲 ${item.ordinal}/${item.count}`,
+      });
+    }
+    // 纠错：语病 / 人设 = 波浪线，单调 / 本地重复 = 底色；光标所在的那一处加重
+    for (const issue of proofreader.issues) {
+      const kind = issue.kind === "grammar" || issue.kind === "consistency" ? "wavy" : "band";
+      const active = issue.id === proofreader.activeIssue?.id;
+      for (const range of issue.ranges) list.push({ start: range.start, end: range.end, kind, tone: issue.kind, active });
+    }
+    return list;
+  }, [outlineLayout, currentSegment, segmentInjecting, proofreader.issues, proofreader.activeIssue]);
 
-  // 锚点前回退提示会放在主编辑区，不在侧栏重复显示。
-  const allNotices = [
-    ...promptPreview.notices.filter((notice) => notice !== ANCHOR_BEFORE_CURSOR_NOTICE),
-    ...(windowNotice ? [windowNotice] : []),
-  ];
+  // 高亮层只需要渲染到最后一个装饰为止：后面的文字不影响前面的排版位置。
+  const decoratedSegments = useMemo(() => {
+    if (decorations.length === 0) return null;
+    const last = Math.max(...decorations.map((d) => d.end));
+    const cut = content.indexOf("\n", last);
+    return splitByDecorations(content.slice(0, cut === -1 ? content.length : cut + 1), decorations);
+  }, [content, decorations]);
+
+  const bookEyebrow = book ? `${book.title} · 第 ${book.volume + 1} 卷` : null;
+  /** 目录面板里的卷列表：当前卷用编辑器里的实时标题与字数。 */
+  const currentVolumeId = volumes?.find((volume) => volume.volume === book?.volume)?.id;
+  const panelVolumes = useMemo(
+    () =>
+      book && volumes
+        ? volumes.map((volume) =>
+            volume.volume === book.volume ? { ...volume, title, characterCount: chapterIndex.totalChars } : volume,
+          )
+        : undefined,
+    [book, volumes, title, chapterIndex.totalChars],
+  );
+  const deferredContent = useDeferredValue(content);
+  const selectedText = selection.end > selection.start ? content.slice(selection.start, Math.min(selection.end, selection.start + 200)) : "";
+
+  const allNotices = [...promptPreview.notices, ...(windowNotice ? [windowNotice] : [])];
 
   const peekKeyLabel = PEEK_KEY_SHORT[settings.peekKey];
   const sampleKeyLabel = SAMPLE_KEY_SHORT[settings.sampleKey];
@@ -1385,6 +1828,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
         ? windowNotice
         : rebuildHint
           ? rebuildHint
+          : proofreader.activeIssue
+            ? `${ISSUE_KIND_LABEL[proofreader.activeIssue.kind]}：${proofreader.activeIssue.message}${proofreader.activeIssue.suggestion ? ` → ${proofreader.activeIssue.suggestion}` : ""}`
           : settings.quickMode
             ? `快速模式常驻 · 长按 ${peekKeyLabel} 暂时穿透浮层`
             : `停顿后出现候选 · ↑↓ 选择 · Enter 插入${sampleKeyLabel ? ` · ${sampleKeyLabel}随机` : ""}`;
@@ -1396,6 +1841,8 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
       style={
         {
           "--editor-font-size": `${settings.fontSize}px`,
+          // 正文字体只影响编辑区里的正文；界面上其它文字的字体写死，不跟着变。
+          "--editor-font-family": fontStackFor(settings.fontFamily),
           "--popover-fade-opacity": settings.fadeOpacity,
         } as CSSProperties
       }
@@ -1412,6 +1859,17 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           >
             <Icon name="arrow-left" size={17} />
             <span>{returning ? "正在保存" : "文库"}</span>
+          </button>
+          <button
+            className={`icon-button tool-button structure-toggle ${chaptersOpen ? "is-active" : ""}`}
+            type="button"
+            title={book ? "目录：卷与章节" : "章节（正文里的 --标题-- 标记行）"}
+            aria-label={book ? "目录" : "章节"}
+            aria-pressed={chaptersOpen}
+            onClick={() => setChaptersOpen((value) => !value)}
+          >
+            <Icon name="chapters" />
+            <span>{book ? "目录" : "章节"}</span>
           </button>
           <span className="topbar-divider" aria-hidden="true" />
           <div className="brand-mark" aria-hidden="true">
@@ -1505,25 +1963,35 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
             <Icon name="search" />
             <span>查找</span>
           </button>
-          <button
-            className={`icon-button tool-button ${sidebarOpen ? "is-active" : ""}`}
-            type="button"
-            title="写作上下文（风格 / 大纲）"
-            aria-label="写作上下文"
-            aria-pressed={sidebarOpen}
-            onClick={() => {
-              const next = !sidebarOpen;
-              setSidebarOpen(next);
-            }}
-          >
-            <Icon name="sidebar" />
-            <span>上下文</span>
-          </button>
+
+          <span className="toolbar-divider" aria-hidden="true" />
+
+          <FontPicker family={settings.fontFamily} onFamilyChange={(family) => onSettingChange("fontFamily", family)} />
+          <FontSizePicker fontSize={settings.fontSize} onFontSizeChange={(size) => onSettingChange("fontSize", size)} />
         </div>
       </header>
 
       {/* ══ 工作区 ══ */}
       <main className="workspace">
+        {chaptersOpen && (
+          <ChapterPanel
+            index={chapterIndex}
+            currentIndex={currentChapter.index}
+            bookTitle={book?.title ?? null}
+            volumes={panelVolumes}
+            currentVolumeId={book ? currentVolumeId : undefined}
+            busy={returning}
+            onSwitchVolume={switchVolume}
+            onCreateVolume={createVolume}
+            onJump={jumpToChapter}
+            onInsertAtCaret={() => insertChapterAt("caret")}
+            onInsertAtEnd={() => insertChapterAt("end")}
+            onRenameChapter={renameChapter}
+            onRemoveChapter={removeChapter}
+            onRenumber={renumberAllChapters}
+            onClose={() => setChaptersOpen(false)}
+          />
+        )}
         {searchOpen && (
           <SearchPanel
             focusSignal={searchFocusSignal}
@@ -1550,7 +2018,7 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           />
         )}
 
-        <section className="editor-stage" aria-label="写作区" onScroll={() => updatePositionRef.current?.()}>
+        <section className="editor-stage" aria-label="写作区" onScroll={() => popoverRef.current?.relayout()}>
           <div className="document-sheet">
             <div className="writing-column">
               {fileBanner && (
@@ -1562,17 +2030,12 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
                 </div>
               )}
 
-              {anchorFallbackActive && (
-                <div className="file-banner is-info context-fallback-banner" role="status">
-                  <span>{ANCHOR_BEFORE_CURSOR_NOTICE}</span>
-                </div>
-              )}
-
               <div className="document-heading">
+                {bookEyebrow && <span className="document-eyebrow">{bookEyebrow}</span>}
                 <input
                   className="document-title"
                   type="text"
-                  aria-label="文稿标题"
+                  aria-label={book ? "卷标题" : "文稿标题"}
                   value={title}
                   onChange={(event) => {
                     titleRef.current = event.target.value;
@@ -1581,21 +2044,44 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
                   }}
                   placeholder="无题"
                 />
+                {chapterIndex.hasMarks && (
+                  <div className="document-chapter">
+                    <span className="document-chapter-label">本章</span>
+                    {currentChapter.title ? (
+                      <ChapterTitleField
+                        key={currentChapter.markStart}
+                        className="document-chapter-title"
+                        ariaLabel="本章标题（改写正文里的标记行）"
+                        value={currentChapter.title}
+                        onCommit={renameCurrentChapter}
+                        placeholder="章节标题"
+                      />
+                    ) : (
+                      <span className="document-chapter-title is-static">{chapterLabel(currentChapter)}</span>
+                    )}
+                  </div>
+                )}
                 <span className="title-rule" aria-hidden="true" />
               </div>
 
               {/* 编辑器外壳：高亮层在下，透明 textarea 在上，两层字体必须完全一致 */}
               <div className="editor-shell">
                 <div className="highlight-layer" ref={highlightRef} aria-hidden="true">
-                  {highlightRange ? (
-                    <>
-                      <span>{content.slice(0, highlightRange.start)}</span>
-                      <span className={`context-span ${promptPreview.anchored ? "is-anchored" : ""}`}>
-                        {content.slice(highlightRange.start, highlightRange.end)}
+                  {decoratedSegments?.map((segment) =>
+                    segment.decoration ? (
+                      <span
+                        key={segment.key}
+                        className={`deco deco-${segment.decoration.kind}`}
+                        data-tone={segment.decoration.tone}
+                        data-active={segment.decoration.active ? "" : undefined}
+                        data-label={segment.decoration.label}
+                      >
+                        {segment.text}
                       </span>
-                      <span>{content.slice(highlightRange.end)}</span>
-                    </>
-                  ) : null}
+                    ) : (
+                      <span key={segment.key}>{segment.text}</span>
+                    ),
+                  )}
                   {"\n"}
                 </div>
 
@@ -1633,9 +2119,10 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
                   onCompositionStart={handleCompositionStart}
                   onCompositionUpdate={handleCompositionUpdate}
                   onCompositionEnd={handleCompositionEnd}
+                  onContextMenu={openContextMenu}
                   onScroll={() => {
                     syncHighlightScroll();
-                    updatePositionRef.current?.();
+                    popoverRef.current?.relayout();
                   }}
                 />
               </div>
@@ -1643,34 +2130,93 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           </div>
         </section>
 
-        {sidebarOpen && (
-          <ContextSidebar
-            {...context}
-            mode={promptPreview.mode}
-            anchored={promptPreview.anchored}
-            anchorHardLimit={promptPreview.hardLimit}
-            notices={allNotices}
-            anchorNotice={anchorNotice}
-            bodyLength={promptPreview.bodyEnd - promptPreview.bodyStart}
-            outlineRef={outlineInputRef}
-            outlineHighlighted={outlineHighlighted}
-            onChange={updateContext}
-            onAnchorHere={anchorHere}
-            onLocateAnchor={locateAnchor}
-            onClearAnchor={clearAnchor}
-            onClose={() => setSidebarOpen(false)}
-          />
-        )}
+        <WorkbenchPanel
+          tab={workbenchTab}
+          onSelectTab={setWorkbenchTab}
+          context={context}
+          onContextChange={updateContext}
+          mode={promptPreview.mode}
+          anchored={promptPreview.anchored}
+          anchorHardLimit={promptPreview.hardLimit}
+          notices={allNotices}
+          anchorNotice={anchorNotice}
+          bodyLength={promptPreview.bodyEnd - promptPreview.bodyStart}
+          hits={hits}
+          chapterIndex={chapterIndex}
+          currentChapter={currentChapter}
+          outlineLayout={outlineLayout}
+          currentSegment={currentSegment}
+          injecting={segmentInjecting}
+          outlineFocusKey={outlineFocusKey}
+          onOutlineFocusHandled={clearOutlineFocus}
+          onSegmentText={setSegmentText}
+          onSegmentInject={setSegmentInject}
+          onAddSegmentAtCaret={addSegmentAtCaret}
+          onMoveSegmentToCaret={moveSegmentToCaret}
+          onRemoveSegment={removeSegment}
+          onLocateSegment={locateSegment}
+          onJumpToChapter={jumpToChapter}
+          materials={materials}
+          onMaterialsChange={updateMaterials}
+          text={deferredContent}
+          selectedText={selectedText}
+          proofread={{
+            issues: proofreader.issues,
+            activeIssueId: proofreader.activeIssue?.id ?? null,
+            status: proofreader.status,
+            consistencyStatus: proofreader.consistencyStatus,
+            hasCharacters: proofreader.hasCharacters,
+            ready: candidateSource.isDemo || backendStatus === "ready",
+            available: proofreader.available,
+            slots: backend.profile?.slots ?? 1,
+            isDemo: proofreader.isDemo,
+            auto: settings.proofreadAuto,
+            local: settings.proofreadLocal,
+            consistencyAuto: settings.consistencyAuto,
+            onAutoChange: (next) => onSettingChange("proofreadAuto", next),
+            onLocalChange: (next) => onSettingChange("proofreadLocal", next),
+            onConsistencyAutoChange: (next) => onSettingChange("consistencyAuto", next),
+            onCheckNow: () => proofreader.run(true),
+            onCheckConsistency: () => proofreader.runConsistency(true),
+            onCancel: proofreader.cancel,
+            onAccept: acceptIssue,
+            onDismiss: proofreader.dismiss,
+            onLocate: locateIssue,
+            onClearAll: proofreader.clearAll,
+          }}
+        />
+        <WorkbenchRail
+          tab={workbenchTab}
+          onSelectTab={setWorkbenchTab}
+          badges={{ context: hits.length > 0 ? Math.min(hits.length, 6) : 0, proofread: Math.min(proofreader.issues.length, 99) }}
+        />
       </main>
 
       {/* ══ 底部状态条 ══ */}
       <footer className="statusbar">
         <div className="statusbar-left">
-          <span className="character-count">{characterCount}</span>
-          <span>字</span>
+          {chapterIndex.hasMarks ? (
+            <>
+              <span>本章</span>
+              <span className="character-count">{currentChapter.chars.toLocaleString("zh-CN")}</span>
+              <span>字 · {book ? "全卷" : "全文"}</span>
+              <span className="character-count">{chapterIndex.totalChars.toLocaleString("zh-CN")}</span>
+              <span>字</span>
+            </>
+          ) : (
+            <>
+              <span className="character-count">{characterCount}</span>
+              <span>字</span>
+            </>
+          )}
+          {(currentSegment.count > 1 || currentSegment.segment) && (
+            <span className="statusbar-segment" title="光标所在的大纲段 / 本章段数">
+              大纲段 {currentSegment.ordinal}/{currentSegment.count}
+            </span>
+          )}
           <span className="statusbar-mode">
             {PROMPT_MODE_LABEL[promptPreview.mode]}
-            {promptPreview.anchored ? " · 锚点" : ""}
+            {promptPreview.anchored ? " · 从段起点" : ""}
           </span>
         </div>
         <div
@@ -1684,17 +2230,18 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
             <span className="save-dot" />
             {saveLabel[saveStatus]}
           </span>
-          {(candidateSource.isDemo || libraryProvider.isDemo) && (
-            <span className="demo-label">{libraryProvider.isDemo ? "文库演示" : "候选演示"}</span>
-          )}
+          {!platform.isElectron && <span className="demo-label">演示模式</span>}
         </div>
       </footer>
 
       {/* ══ 候选浮层 ══ */}
       {candidateOpen && (
         <CandidatePopover
-          panelRef={panelRef}
-          position={candidatePosition}
+          ref={popoverRef}
+          editorRef={editorRef}
+          text={content}
+          caret={selection.start}
+          relayoutKey={`${settings.fontSize}|${settings.fontFamily}`}
           visible={visibleCandidates}
           selectedIndex={localIndex}
           loading={candidateLoading}
@@ -1707,29 +2254,23 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           prefillChars={prefillChars}
           peekKeyLabel={peekKeyLabel}
           sampleKeyLabel={sampleKeyLabel}
+          expansions={visibleCandidates.map((_, index) => expander.rows[page * pageSize + index] ?? null)}
+          expanding={expander.running}
+          expandHint={settings.expandEnabled && Boolean(sampleKeyLabel)}
           onHover={(index) => setGlobalIndex(page * pageSize + index)}
           onPick={pickCandidate}
           onRetry={() => scheduleCandidates(contentRef.current, selectionRef.current, true)}
         />
       )}
 
-      {/* 测量光标用的隐藏镜像层 */}
-      <div ref={mirrorRef} className="caret-mirror" aria-hidden="true" />
-
       {/* ══ EOS 弱提醒 Toast（绝不阻塞打字） ══ */}
       {toastVisible && (
         <GentleToast
-          message="模型认为本段剧情可能已收束。需要更新本章大纲吗？"
+          message="模型认为这一段剧情可能已收束。要更新这一段的大纲，或新起一段吗？"
           onPrimary={() => {
             setToastVisible(false);
-            setSidebarOpen(true);
-            if (!contextRef.current.outlineEnabled) updateContext("outlineEnabled", true);
-            setOutlineHighlighted(true);
-            // 等侧边栏渲染出来后再聚焦大纲框
-            window.setTimeout(() => {
-              outlineInputRef.current?.focus();
-              window.setTimeout(() => setOutlineHighlighted(false), 1600);
-            }, 60);
+            setWorkbenchTab("outline");
+            setOutlineFocusKey(segmentKey(currentSegment));
           }}
           onDismiss={() => {
             setToastVisible(false);
@@ -1738,6 +2279,9 @@ export function WritingEditor({ initial, sourceFormat, settings, onToggleAutoSav
           }}
         />
       )}
+
+      {/* ══ 右键菜单 ══ */}
+      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={closeContextMenu} />}
 
       {/* ══ 日志弹窗 ══ */}
       {logText !== null && (

@@ -354,6 +354,11 @@ kbd {
   .context-sidebar {
     right: 0;
   }
+
+  /* 工作面板浮层时让出右侧常驻的图标栏 */
+  .workbench-panel {
+    right: 76px;
+  }
 }
 
 @media (max-width: 860px) {
@@ -507,8 +512,67 @@ kbd {
   gap: 14px;
 }
 
+/*
+ * 顶栏里空间不够时（窄窗口 / 工具列较长），让状态文字先截断，
+ * 而不是整段溢出、压到右侧的工具列上。
+ */
+.backend-bar.is-compact .backend-status,
+.backend-bar.is-compact .backend-status-text {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.backend-bar.is-compact .backend-status-text {
+  text-overflow: ellipsis;
+}
+
+/*
+ * 顶栏只有一条：模型状态在这里是参考信息，宽度可预测、绝不截断。
+ * 这里只留状态点 + 进度条，整句状态与剩余时间放在 title 里（鼠标悬停可见），
+ * 完整的一段仍然在文库首页显示。
+ */
+.backend-bar.is-compact {
+  flex: 0 1 auto; /* 工具列变长时可以让出进度条的位置，绝不溢出到工具列上 */
+  min-width: 0;
+  overflow: hidden;
+}
+
+.backend-bar.is-compact .backend-status-text,
+.backend-bar.is-compact .backend-progress-meta,
+.backend-bar.is-compact .backend-progress-summary {
+  display: none;
+}
+
 .backend-bar.is-compact .backend-progress {
-  width: clamp(140px, 18vw, 260px);
+  flex: 0 1 auto;
+  width: clamp(40px, 10vw, 200px);
+  min-width: 30px;
+}
+
+/*
+ * 顶栏现在多了一个「字体」控件，窗口变窄时按「先说明文字、再进度条」的顺序让位，
+ * 保证任何宽度下都不会出现两段内容叠在一起。
+ */
+@media (max-width: 1360px) {
+  .brand-caption {
+    display: none;
+  }
+}
+
+@media (max-width: 1240px) {
+  .brand-area .topbar-divider {
+    display: none;
+  }
+
+  .backend-bar.is-compact .backend-progress {
+    display: none;
+  }
+}
+
+@media (max-width: 1120px) {
+  .backend-bar.is-compact {
+    display: none;
+  }
 }
 
 .backend-bar.is-compact .backend-progress-track {

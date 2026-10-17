@@ -2,10 +2,9 @@
  * 候选词数据源。
  *
  * 这里是「唯一的数据源切换点」：
- *   chooseCandidateSource() 检测 window.api 是否存在，
- *   存在 → realCandidateProvider（走 Electron IPC）
- *   不存在 → mockCandidateProvider（浏览器演示）
- * 集成到 Electron 时，除了 preload 暴露 api，这个文件之外的代码一行都不用改。
+ *   chooseCandidateSource() 按 platform.isElectron 选择
+ *   Electron → realCandidateProvider（走 IPC）
+ *   浏览器   → mockCandidateProvider（演示）
  *
  * 概率的分工：
  *   后端只负责给 logit / logprob（原始数值），
@@ -13,6 +12,8 @@
  *   这样「软化温度」才能做成可调设置，不用每次改温度都重新请求。
  */
 
+import { DEFAULT_EOS_TEXTS } from "../../../shared/modelProfile";
+import { platform } from "./platform";
 import type { Candidate, CandidateProvider, CandidateRequest } from "./types";
 
 /** 后端固定返回的候选数量。前端自己分页展示，设置里的「每页候选数」只控制每页显示几个。 */
@@ -22,26 +23,18 @@ export const BACKEND_TOP_K = 100;
  * ═══ 前端是怎么认出「终止符」的 ═══
  *
  * 前端自己**不做分词**，也拿不到 token id 表，所以只能靠两条线索：
- *   1. 主进程在 Candidate 上标好的 isEos（最可靠：主进程按 token id 判断，
- *      Qwen2/2.5/3 的 <|im_end|> = 151645，<|endoftext|> = 151643）；
- *   2. 主进程没标时，退而比对候选的**文本**是否正好等于下面这些特殊 token 的字符串形式。
+ *   1. 主进程在 Candidate 上标好的 isEos（最可靠：主进程按 token id 判断）；
+ *   2. 主进程没标时（或 mock），退而比对候选文本是否正好等于终止符字符串。
+ * 终止符列表来自 ModelProfile.eosTexts（主进程启动后从 llama-server 查到，含模型自报的 eos_token）；
+ * 没有画像时用 shared 里的默认列表。
  *
- * 第 2 条有两个已知的坑，都需要主进程配合（见 INTEGRATION.md）：
- *   - llama-server 对特殊 token 的 `token` 字段有时返回空串 ""，文本比对就会漏掉；
- *   - 纯续写（plain）模式下 prompt 里没有 <|im_start|>，Qwen 很少会预测 <|im_end|>，
- *     更可能给出 <|endoftext|>，所以列表里两者都要有。
- *
- * 识别出来之后还要过两道门槛才算一次「命中」（见 App.tsx runJob）：
+ * 识别出来之后还要过两道门槛才算一次「命中」（见 candidatePostprocess.ts）：
  *   - 排名门槛：出现在前 eosScanTopN 个候选里；
  *   - 概率门槛：软化后的概率 ≥ eosMinProb（默认 10%）。
- * 以及一条前置条件：**只在大纲模式下计数**。纯续写 / 仅风格模式没有「本章该收尾」的概念，
- * 模型偶尔给出终止符只是统计噪声，不应打扰作者。
+ * 以及一条前置条件：**只在大纲模式下计数**。纯续写 / 仅风格模式没有「本章该收尾」的概念。
  */
-export const EOS_TOKENS = ["<|im_end|>", "</s>", "<|endoftext|>", "<|end|>", "<|eot_id|>", "<|im_start|>"];
-
-/** 判断一个候选文本是不是终止符。 */
-export function isEosText(text: string): boolean {
-  return EOS_TOKENS.includes(text.trim());
+export function isEosText(text: string, eosTexts: readonly string[] = DEFAULT_EOS_TEXTS): boolean {
+  return eosTexts.includes(text.trim());
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -262,18 +255,14 @@ export const realCandidateProvider: CandidateProvider = async (
   signal: AbortSignal,
 ): Promise<Candidate[]> => {
   if (signal.aborted) throw new DOMException("请求已取消", "AbortError");
+  const api = platform.api;
+  if (!api) throw new Error("主进程尚未暴露候选接口。");
 
-  const api = window.api;
-  const getCandidates = api?.getCandidates;
-  if (!getCandidates) throw new Error("主进程尚未暴露 getCandidates 接口。");
-
-  const onAbort = () => {
-    void api?.cancelCandidates?.(request.requestId);
-  };
+  const onAbort = () => api.cancelCandidates(request.requestId);
   signal.addEventListener("abort", onAbort, { once: true });
 
   try {
-    const result = await getCandidates(request);
+    const result = await api.getCandidates(request);
     if (signal.aborted) throw new DOMException("请求已取消", "AbortError");
 
     // 规范化：补 logit（缺失时用 log(prob)）、补 isEos。
@@ -306,13 +295,7 @@ export interface CandidateSource {
 
 /** 启动时自动选择数据源。整个应用只有这一处做判断。 */
 export function chooseCandidateSource(): CandidateSource {
-  if (typeof window !== "undefined" && typeof window.api?.getCandidates === "function") {
-    return {
-      provider: realCandidateProvider,
-      isDemo: false,
-      supportsCancel: typeof window.api.cancelCandidates === "function",
-    };
-  }
+  if (platform.isElectron) return { provider: realCandidateProvider, isDemo: false, supportsCancel: true };
   // mock 的 abort 会真正停掉计时器，所以它「支持取消」。
   return { provider: mockCandidateProvider, isDemo: true, supportsCancel: true };
 }

@@ -135,6 +135,14 @@
   margin-top: 12px;
 }
 
+.tier-options {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.setting-hint.is-warning {
+  color: var(--accent-strong);
+}
+
 .theme-option {
   display: inline-flex;
   align-items: center;

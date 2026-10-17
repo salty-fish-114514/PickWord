@@ -746,3 +746,80 @@
     flex: 1 1 auto;
   }
 }
+
+
+/* ═══════ § W10. 「模型与推理」面板（首页弹窗，复用上面的表单 / 设备 / 按钮样式） ═══════ */
+
+.backend-dialog {
+  width: min(680px, 100%);
+  max-height: min(86vh, 860px);
+  overflow-y: auto;
+  padding: 26px 30px 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--paper);
+  box-shadow: var(--popover-shadow);
+  color: var(--ink);
+}
+
+.backend-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.backend-dialog-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.backend-dialog-head .setup-section-subtitle {
+  margin: 0;
+  word-break: break-all;
+}
+
+.backend-dialog .setup-status {
+  margin-top: 12px;
+}
+
+.backend-dialog-body .setup-form-row:first-child {
+  margin-top: 10px;
+}
+
+.backend-dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 14px;
+}
+
+.backend-dialog .setup-device-picker {
+  margin-top: 0;
+}
+
+.backend-dialog-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.backend-dialog-inline .setup-hint {
+  margin: 0;
+}
+
+.backend-dialog-actions {
+  margin-top: 22px;
+}
+
+.backend-dialog-wizard {
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .backend-dialog-grid {
+    grid-template-columns: 1fr;
+  }
+}

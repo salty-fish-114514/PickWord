@@ -27,7 +27,18 @@ export type IconName =
   | "edit"
   | "folder"
   | "upload"
-  | "warning";
+  | "warning"
+  | "chapters"
+  | "outline"
+  | "person"
+  | "lore"
+  | "book"
+  | "check"
+  | "copy"
+  | "clipboard"
+  | "scissors"
+  | "text"
+  | "textSize";
 
 interface IconProps {
   name: IconName;
@@ -115,6 +126,89 @@ export function Icon({ name, size = 18 }: IconProps) {
         <svg {...common}>
           <circle cx="12" cy="5.5" r="2.2" />
           <path d="M12 7.7V20M7 11H4.5a7.5 7.5 0 0 0 15 0H17" />
+        </svg>
+      );
+    case "chapters":
+      return (
+        <svg {...common}>
+          <path d="M5 5.5h14M5 10h9M5 14.5h14M5 19h9" />
+        </svg>
+      );
+    case "outline":
+      return (
+        <svg {...common}>
+          <path d="M8 6h11M8 12h11M8 18h11" />
+          <circle cx="4.5" cy="6" r="1" />
+          <circle cx="4.5" cy="12" r="1" />
+          <circle cx="4.5" cy="18" r="1" />
+        </svg>
+      );
+    case "person":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="8" r="3.6" />
+          <path d="M4.8 20c.7-4 3.6-6.2 7.2-6.2s6.5 2.2 7.2 6.2" />
+        </svg>
+      );
+    case "lore":
+      return (
+        <svg {...common}>
+          <path d="M12 3.5 20 8v8l-8 4.5L4 16V8z" />
+          <path d="M12 12.5 20 8M12 12.5 4 8M12 12.5v8" />
+        </svg>
+      );
+    case "book":
+      return (
+        <svg {...common}>
+          <path d="M4.5 5.5A2 2 0 0 1 6.5 3.5h13v15h-13a2 2 0 0 0-2 2z" />
+          <path d="M4.5 18.5a2 2 0 0 1 2-2h13M8 7.5h7" />
+        </svg>
+      );
+    case "check":
+      return (
+        <svg {...common}>
+          <path d="m5 12.5 4.5 4.5L19 7.5" />
+        </svg>
+      );
+    case "copy":
+      return (
+        <svg {...common}>
+          <rect x="8.5" y="8.5" width="11" height="11" rx="1.6" />
+          <path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" />
+        </svg>
+      );
+    case "clipboard":
+      return (
+        <svg {...common}>
+          <rect x="5.5" y="5" width="13" height="15.5" rx="1.8" />
+          <path d="M9 5V3.5h6V5M9 11h6M9 15h4" />
+        </svg>
+      );
+    case "scissors":
+      return (
+        <svg {...common}>
+          <circle cx="7" cy="7" r="2.5" />
+          <circle cx="7" cy="17" r="2.5" />
+          <path d="M9 8.5 19.5 19M9 15.5 19.5 5" />
+        </svg>
+      );
+    case "text":
+      // 字体：衬线大写字干（上横 + 竖 + 下横），一眼能认出是「字型」而不是铅笔。
+      return (
+        <svg {...common}>
+          <path d="M5.5 7.5V5.5h13v2" />
+          <path d="M12 5.5v13" />
+          <path d="M8.8 18.5h6.4" />
+        </svg>
+      );
+    case "textSize":
+      // 字号：一个大 T 加一个小 t。
+      return (
+        <svg {...common}>
+          <path d="M4 7.5V6h8v1.5" />
+          <path d="M8 6v11.5" />
+          <path d="M13.5 15v-1.2h6V15" />
+          <path d="M16.5 13.8v3.7" />
         </svg>
       );
     case "sparkle":
