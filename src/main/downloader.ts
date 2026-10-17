@@ -1,11 +1,12 @@
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
+import type { ReadableStream as WebReadableStream } from 'node:stream/web'
 import { pipeline } from 'node:stream/promises'
 import { execFile, type ChildProcess } from 'node:child_process'
 import { BrowserWindow, net } from 'electron'
-import type { DownloadProgress } from '../shared/ipc'
+import type { DownloadProgress, IpcPushMap } from '../shared/ipc'
 
-export function broadcast(channel: string, data: unknown): void {
+export function broadcast<C extends keyof IpcPushMap>(channel: C, data: IpcPushMap[C]): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, data)
   }
@@ -200,7 +201,7 @@ export async function downloadFile(
       broadcast('setup:progress', prog)
     }
 
-    const nodeStream = Readable.fromWeb(response.body as any)
+    const nodeStream = Readable.fromWeb(response.body as unknown as WebReadableStream)
 
     const onAbort = (): void => {
       attemptController.abort()
@@ -297,6 +298,11 @@ export async function downloadFile(
   fs.renameSync(tempPath, destPath)
 }
 
+/** PowerShell 单引号字符串里，单引号用两个单引号转义（路径含 ' 时不会把命令截断）。 */
+function psQuote(value: string): string {
+  return value.replace(/'/g, "''")
+}
+
 /**
  * 调用 PowerShell 原生命令解压 ZIP（不引入第三方库）。
  * 支持取消。
@@ -325,7 +331,7 @@ export function extractZip(
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`
+        `Expand-Archive -LiteralPath '${psQuote(zipPath)}' -DestinationPath '${psQuote(destDir)}' -Force`
       ],
       { windowsHide: true, timeout: 300000 },
       (err) => {

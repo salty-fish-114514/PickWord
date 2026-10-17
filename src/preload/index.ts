@@ -1,26 +1,47 @@
 /**
  * preload：renderer 与主进程之间的「受限桥梁」。
- * 旧版单文档接口（loadDocument / openDocument / commitOpenedDocument / saveDocument）
- * 已随主进程一起移除；前端 WriterApi 里这几个方法本来就是可选的（?:），
- * 缺失不会报错，只是 App.tsx 里 hasLegacyApi 这个判断永远是 false（这正是预期）。
+ *
+ * 所有通道都经由 shared/ipc.ts 的 IpcInvokeMap / IpcSendMap / IpcPushMap 约束，
+ * 通道名写错、参数或返回类型不符都会在编译期报错。
+ * `WriterApi` 直接取自这里的 api 对象（见 index.d.ts），renderer 不再手写一份镜像接口。
  */
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import type { BackendProgress, BackendStatus } from '../shared/types'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import type {
-  LibraryEntry,
-  LibraryFormat,
-  LibraryDirectory,
-  Candidate,
+  BackendConfig,
+  BackendProgress,
+  BackendStatus,
   CandidateRequest,
+  ChoosePathOptions,
+  CompletionRequest,
+  DeployConfig,
   DocumentPayload,
-  ModelInfo,
-  SaveResult,
-  HardwareReport,
-  SetupState,
-  BackendDeviceInfo,
-  UiBackendStatus,
-  DownloadProgress 
+  ExpandChunk,
+  ExpandRequest,
+  IpcInvokeArgs,
+  IpcInvokeChannel,
+  IpcInvokeResult,
+  IpcPushMap,
+  IpcSendMap,
+  LibraryFormat,
+  UiBackendStatus
 } from '../shared/ipc'
+
+/* ───────── 类型化的 ipcRenderer 封装 ───────── */
+
+function invoke<C extends IpcInvokeChannel>(channel: C, ...args: IpcInvokeArgs<C>): Promise<IpcInvokeResult<C>> {
+  return ipcRenderer.invoke(channel, ...args)
+}
+
+function send<C extends keyof IpcSendMap>(channel: C, ...args: IpcSendMap[C]): void {
+  ipcRenderer.send(channel, ...args)
+}
+
+/** 订阅主进程推送；返回取消订阅函数。 */
+function on<C extends keyof IpcPushMap>(channel: C, listener: (payload: IpcPushMap[C]) => void): () => void {
+  const handler = (_event: IpcRendererEvent, payload: IpcPushMap[C]): void => listener(payload)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
+}
 
 function toUiStatus(status: BackendStatus): UiBackendStatus {
   switch (status.state) {
@@ -35,93 +56,82 @@ function toUiStatus(status: BackendStatus): UiBackendStatus {
   }
 }
 
+/* ───────── 暴露给页面的 API ───────── */
+
 const api = {
-  getSetupState: (): Promise<SetupState> => ipcRenderer.invoke('setup:get-state'),
-  // 硬件检测(首次设置向导用,可能需要几秒)
-  detectHardware: (): Promise<HardwareReport> => ipcRenderer.invoke('setup:detect-hardware'),
-  // 查询已安装的 llama-server 实际识别到的设备列表（用于 --device 选择）
-  // 自动从 backend.json 读取 exe 路径
-  listBackendDevices: (): Promise<BackendDeviceInfo[]> =>
-    ipcRenderer.invoke('setup:list-devices'),
-  // 更新 backend.json 中的 --device 参数
-  updateBackendDevice: (deviceId: string): Promise<void> =>
-    ipcRenderer.invoke('setup:update-device', deviceId),
-  // 通知主进程部署流程已完成（包括跳过设备选择的情况）
-  deployFinished: (): void =>
-    ipcRenderer.send('setup:deploy-finished'),
+  platform: process.platform,
 
-  deployBackend: (config: {
-    targetDir: string
-    backendKind: string
-    cudaVersion?: string
-    modelUrl: string
-    localModelPath?: string
-    localExePath?: string
-    threads: number
-  }): Promise<void> => ipcRenderer.invoke('setup:deploy', config),
+  // ─── 首次设置 / 后端配置 ───
+  getSetupState: () => invoke('setup:get-state'),
+  getSetupCatalog: () => invoke('setup:get-catalog'),
+  /** 硬件检测（首次设置向导用，可能需要几秒） */
+  detectHardware: () => invoke('setup:detect-hardware'),
+  /** 已安装的 llama-server 实际识别到的设备列表（用于 --device 选择） */
+  listBackendDevices: () => invoke('setup:list-devices'),
+  /** 写入 --device 并重启后端；null = 移除 --device 交给 llama.cpp 自选 */
+  updateBackendDevice: (deviceId: string | null) => invoke('setup:update-device', deviceId),
+  /** 整体替换 backend.json 并重启后端（首页「模型与推理」面板） */
+  applyBackendConfig: (config: BackendConfig) => invoke('setup:apply-config', config),
+  deployBackend: (config: DeployConfig) => invoke('setup:deploy', config),
+  cancelDeploy: () => send('setup:cancel-deploy'),
+  onDeployProgress: (listener: (p: IpcPushMap['setup:progress']) => void) => on('setup:progress', listener),
 
-  cancelDeploy: (): void => ipcRenderer.send('setup:cancel-deploy'),
+  // ─── 系统对话框 / 文件路径 ───
+  choosePath: (options: ChoosePathOptions) => invoke('dialog:choose-path', options),
+  /** 拖拽进来的 File 对象 → 磁盘绝对路径（Electron 32 起 File.path 已移除，只能在 preload 里取） */
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
 
-  onDeployProgress: (listener: (p: DownloadProgress) => void): (() => void) => {
-    const handler = (_e: IpcRendererEvent, p: DownloadProgress): void => listener(p)
-    ipcRenderer.on('setup:progress', handler)
-    return () => ipcRenderer.removeListener('setup:progress', handler)
-  },
+  // ─── 候选与模型 ───
+  getCandidates: (request: CandidateRequest) => invoke('candidates:get', request),
+  cancelCandidates: (requestId: string) => send('candidates:cancel', requestId),
+  getModelProfile: () => invoke('model:profile'),
+  /** 系统已装字体的显示名清单（主进程侧读注册表，见 main/fonts.ts）。 */
+  listSystemFonts: (force?: boolean) => invoke('fonts:list', force),
+  complete: (request: CompletionRequest) => invoke('llm:complete', request),
+  cancelCompletion: (requestId: string) => send('llm:cancel', requestId),
+  expandStart: (request: ExpandRequest) => invoke('expand:start', request),
+  expandCancel: (requestId: string) => send('expand:cancel', requestId),
+  onExpandChunk: (listener: (chunk: ExpandChunk) => void) => on('expand:chunk', listener),
 
-  getCandidates: (request: CandidateRequest): Promise<Candidate[]> =>
-    ipcRenderer.invoke('candidates:get', request),
-  cancelCandidates: (requestId: string): void => ipcRenderer.send('candidates:cancel', requestId),
-  getModelInfo: (): Promise<ModelInfo | null> => ipcRenderer.invoke('model:info'),
+  // ─── 导出 ───
+  saveDocumentAs: (doc: DocumentPayload) => invoke('doc:save-as', doc),
 
-  saveDocumentAs: (doc: DocumentPayload): Promise<SaveResult | null> =>
-    ipcRenderer.invoke('doc:save-as', doc),
-
-  getBackendStatus: async (): Promise<UiBackendStatus> => {
-    const status: BackendStatus = await ipcRenderer.invoke('backend:getStatus')
-    return toUiStatus(status)
-  },
-  onBackendStatus: (listener: (status: UiBackendStatus) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, status: BackendStatus): void => {
+  // ─── 后端状态与加载进度 ───
+  getBackendStatus: async (): Promise<UiBackendStatus> => toUiStatus(await invoke('backend:get-status')),
+  onBackendStatus: (listener: (status: UiBackendStatus) => void) =>
+    on('backend:status', (status) => {
       console.info('[backend]', status.state, status.message)
       listener(toUiStatus(status))
-    }
-    ipcRenderer.on('backend:status', handler)
-    return () => ipcRenderer.removeListener('backend:status', handler)
-  },
+    }),
+  getBackendProgress: (): Promise<BackendProgress | null> => invoke('backend:get-progress'),
+  onBackendProgress: (listener: (progress: BackendProgress) => void) => on('backend:progress', listener),
+  retryBackend: () => invoke('backend:restart'),
+  openBackendLog: () => invoke('backend:open-log'),
 
-  getBackendProgress: (): Promise<BackendProgress | null> => ipcRenderer.invoke('backend:getProgress'),
-  onBackendProgress: (listener: (progress: BackendProgress) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, progress: BackendProgress): void => listener(progress)
-    ipcRenderer.on('backend:progress', handler)
-    return () => ipcRenderer.removeListener('backend:progress', handler)
-  },
+  // ─── 关窗前保存 ───
+  onFlushRequest: (listener: () => void) => on('app:flush', () => listener()),
+  confirmClose: () => send('app:flush-done'),
 
-  retryBackend: (): Promise<void> => ipcRenderer.invoke('backend:restart'),
-  openBackendLog: (): Promise<void> => ipcRenderer.invoke('backend:openLog'),
-
-  onFlushRequest: (listener: () => void): (() => void) => {
-    const handler = (): void => listener()
-    ipcRenderer.on('app:flush', handler)
-    return () => ipcRenderer.removeListener('app:flush', handler)
-  },
-  confirmClose: (): void => ipcRenderer.send('app:flush-done'),
-
-  // ─── 多篇文稿文库 ─────────────────────────────────────────────
-  listLibraryDocuments: (): Promise<LibraryEntry[]> => ipcRenderer.invoke('library:list'),
-  readLibraryDocument: (id: string): Promise<DocumentPayload> => ipcRenderer.invoke('library:read', id),
-  createLibraryDocument: (doc: DocumentPayload, format: LibraryFormat): Promise<LibraryEntry> =>
-    ipcRenderer.invoke('library:create', doc, format),
-  saveLibraryDocument: (id: string, doc: DocumentPayload): Promise<LibraryEntry> =>
-    ipcRenderer.invoke('library:save', id, doc),
-  renameLibraryDocument: (id: string, title: string): Promise<LibraryEntry> =>
-    ipcRenderer.invoke('library:rename', id, title),
-  deleteLibraryDocuments: (ids: string[]): Promise<void> => ipcRenderer.invoke('library:delete', ids),
-  touchLibraryDocument: (id: string): Promise<LibraryEntry> => ipcRenderer.invoke('library:touch', id),
-  getLibraryDirectory: (): Promise<LibraryDirectory> => ipcRenderer.invoke('library:directory'),
-  chooseLibraryDirectory: (): Promise<LibraryDirectory | null> =>
-    ipcRenderer.invoke('library:choose-directory'),
-  resetLibraryDirectory: (): Promise<LibraryDirectory> => ipcRenderer.invoke('library:reset-directory')
+  // ─── 多篇文稿文库 ───
+  listLibraryDocuments: () => invoke('library:list'),
+  readLibraryDocument: (id: string) => invoke('library:read', id),
+  createLibraryDocument: (doc: DocumentPayload, format: LibraryFormat) => invoke('library:create', doc, format),
+  saveLibraryDocument: (id: string, doc: DocumentPayload) => invoke('library:save', id, doc),
+  renameLibraryDocument: (id: string, title: string) => invoke('library:rename', id, title),
+  deleteLibraryDocuments: (ids: string[]) => invoke('library:delete', ids),
+  touchLibraryDocument: (id: string) => invoke('library:touch', id),
+  createLibraryBook: (title: string) => invoke('library:create-book', title),
+  createLibraryVolume: (bookId: string) => invoke('library:create-volume', bookId),
+  renameLibraryBook: (bookId: string, title: string) => invoke('library:rename-book', bookId, title),
+  convertLibraryToBook: (id: string) => invoke('library:convert-to-book', id),
+  convertLibraryToStandalone: (bookId: string) => invoke('library:convert-to-standalone', bookId),
+  getLibraryDirectory: () => invoke('library:directory'),
+  chooseLibraryDirectory: () => invoke('library:choose-directory'),
+  resetLibraryDirectory: () => invoke('library:reset-directory')
 }
+
+/** renderer 侧 window.api 的类型（index.d.ts 里引用）。 */
+export type WriterApi = typeof api
 
 if (!process.contextIsolated) {
   throw new Error('preload 要求开启 contextIsolation')

@@ -2,14 +2,23 @@
  * 候选词：把 renderer 的请求转发给 llama-server 的 /completion，
  * 再把返回的 top-N 概率整理成前端要的 Candidate[]。
  *
- * 用 Python 类比：这个文件相当于一个模块，对外只有三个函数：
+ * 对外三个函数：
  *   getCandidates()    处理一次请求
  *   cancelCandidates() 取消一次请求
- *   getModelInfo()     查询模型上下文长度等信息
+ *   getModelProfile()  模型画像（上下文长度、提示词模板、终止符），renderer 据此拼 prompt
  */
 import { app } from 'electron'
-import { backend, loadConfig } from './backend'
-import type { Candidate, CandidateRequest, ModelInfo, PromptMode } from '../shared/ipc'
+import { backend } from './backend'
+import { readBackendConfig } from './backendConfig'
+import { getArgNumber } from '../shared/backendArgs'
+import type { Candidate, CandidateRequest, PromptMode } from '../shared/ipc'
+import {
+  DEFAULT_EOS_TEXTS,
+  DEFAULT_HIDDEN_TEXTS,
+  detectNoThinkPrefix,
+  detectPromptTemplate,
+  type ModelProfile
+} from '../shared/modelProfile'
 
 const MAX_TOP_K = 200
 /** 多要几个：过滤掉字节碎片、特殊标记之后，仍然能凑够 topK 个。 */
@@ -17,11 +26,6 @@ const EXTRA_PROBS = 16
 /** 单次请求最长等待时间。纯 CPU 下全量 prefill 一万多 token 可能要一两分钟。 */
 const REQUEST_TIMEOUT_MS = 180_000
 const META_TIMEOUT_MS = 5_000
-
-/** 可能代表「文本结束」的标记。哪些真的是单个 token，启动后用 /tokenize 查询确认。 */
-const EOS_STRINGS = ['<|im_end|>', '<|endoftext|>', '<|eot_id|>', '<end_of_turn>', '<eos>', '</s>', '<|end|>']
-/** 不是结束符、但也不该出现在候选里的特殊标记（Qwen3 系列的思考标记等）。 */
-const HIDDEN_STRINGS = ['<think>', '</think>', '<|im_start|>']
 const PROMPT_MODES: readonly PromptMode[] = ['plain', 'outline', 'style', 'full']
 
 /* ───────── 处理「来路不明的 JSON」的小工具 ─────────
@@ -30,20 +34,27 @@ const PROMPT_MODES: readonly PromptMode[] = ['plain', 'outline', 'style', 'full'
 import type { Json } from './ioUtils'
 import { isObj, asNum, asStr } from './ioUtils'
 
-/* ───────── 模型信息与特殊 token（每次后端启动后查一次） ───────── */
+/* ───────── 模型画像与特殊 token（每次后端启动后查一次） ───────── */
 
 interface TokenMeta {
   eosIds: Set<number>
   hiddenIds: Set<number>
   eosTexts: Set<string>
-  info: ModelInfo
+  profile: ModelProfile
 }
 
 const EMPTY_META: TokenMeta = {
   eosIds: new Set(),
   hiddenIds: new Set(),
-  eosTexts: new Set(EOS_STRINGS),
-  info: { contextLength: null, modelName: '' }
+  eosTexts: new Set(DEFAULT_EOS_TEXTS),
+  profile: {
+    modelName: '',
+    contextLength: null,
+    slots: 1,
+    template: detectPromptTemplate('', ''),
+    noThinkPrefix: '',
+    eosTexts: [...DEFAULT_EOS_TEXTS]
+  }
 }
 
 async function requestJson(url: string, body?: unknown): Promise<unknown> {
@@ -73,24 +84,19 @@ async function singleTokenId(baseUrl: string, text: string): Promise<number | nu
   return null
 }
 
-/** 备用方案：从 backend.json 的启动参数里找 -c / --ctx-size。 */
-function contextLengthFromArgs(): number | null {
-  try {
-    const args = loadConfig().args
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] === '-c' || args[i] === '--ctx-size') {
-        const n = Number(args[i + 1])
-        if (Number.isInteger(n) && n > 0) return n
-      }
-    }
-  } catch {
-    // 配置读不到
-  }
-  return null
+/** 备用方案：从 backend.json 的启动参数里找 -c（总上下文）与 --parallel；每槽 = -c ÷ 槽位数。 */
+function contextFromArgs(): { perSlot: number | null; slots: number } {
+  const result = readBackendConfig()
+  if (!result.ok) return { perSlot: null, slots: 1 }
+  const total = getArgNumber(result.config.args, '-c') ?? getArgNumber(result.config.args, '--ctx-size')
+  const parallel = getArgNumber(result.config.args, '--parallel') ?? getArgNumber(result.config.args, '-np')
+  const slots = parallel !== null && Number.isInteger(parallel) && parallel > 0 ? parallel : 1
+  const perSlot = total !== null && Number.isInteger(total) && total > 0 ? Math.floor(total / slots) : null
+  return { perSlot, slots }
 }
 
 async function discoverMeta(baseUrl: string): Promise<TokenMeta> {
-  // /props 是 llama-server 的「服务器属性」接口，包含实际生效的上下文长度、模型路径等。
+  // /props 是 llama-server 的「服务器属性」接口，包含实际生效的上下文长度、模型路径、chat_template 等。
   let props: unknown = null
   try {
     props = await requestJson(`${baseUrl}/props`)
@@ -99,11 +105,19 @@ async function discoverMeta(baseUrl: string): Promise<TokenMeta> {
   }
   const p = isObj(props) ? props : {}
   const gen = isObj(p.default_generation_settings) ? p.default_generation_settings : {}
+  // /props 的 n_ctx 是单个槽位的上下文（服务器已按 --parallel 平分）
+  const fromArgs = contextFromArgs()
   const fromServer = asNum(gen.n_ctx) ?? asNum(p.n_ctx)
-  const contextLength = fromServer && fromServer > 0 ? fromServer : contextLengthFromArgs()
+  const contextLength = fromServer && fromServer > 0 ? fromServer : fromArgs.perSlot
+  const slotsFromServer = asNum(p.total_slots)
+  const slots = slotsFromServer && slotsFromServer > 0 ? Math.round(slotsFromServer) : fromArgs.slots
   const modelName = (asStr(p.model_path) ?? '').split(/[\\/]/).pop() ?? ''
+  const template = detectPromptTemplate(asStr(p.chat_template) ?? '', modelName)
+  // 有思考开关的模型（Qwen3.5 等）：指令类任务的 assistant 回合要以空思考块开头，否则文法约束下会坍缩成「无」
+  //（见 ModelProfile.noThinkPrefix 的事故记录）。候选续写不用它。
+  const noThinkPrefix = detectNoThinkPrefix(asStr(p.chat_template) ?? '', modelName)
 
-  const eosTexts = new Set(EOS_STRINGS)
+  const eosTexts = new Set(DEFAULT_EOS_TEXTS)
   const serverEos = asStr(p.eos_token)
   if (serverEos) eosTexts.add(serverEos)
 
@@ -113,21 +127,26 @@ async function discoverMeta(baseUrl: string): Promise<TokenMeta> {
     if (id !== null) eosIds.add(id)
   }
   const hiddenIds = new Set<number>()
-  for (const text of HIDDEN_STRINGS) {
+  for (const text of DEFAULT_HIDDEN_TEXTS) {
     const id = await singleTokenId(baseUrl, text)
     if (id !== null && !eosIds.has(id)) hiddenIds.add(id)
   }
 
   if (!app.isPackaged) {
-    console.log(`[candidates] 模型=${modelName} n_ctx=${contextLength} EOS ids=[${[...eosIds]}]`)
+    console.log(`[candidates] 模型=${modelName} n_ctx/槽=${contextLength} 槽位=${slots} template=${template.id} EOS ids=[${[...eosIds]}]`)
   }
-  return { eosIds, hiddenIds, eosTexts, info: { contextLength, modelName } }
+  return {
+    eosIds,
+    hiddenIds,
+    eosTexts,
+    profile: { modelName, contextLength, slots, template, noThinkPrefix, eosTexts: [...eosTexts] }
+  }
 }
 
 /** 缓存：同一次后端启动只查一次；后端重启（generation 变化）后重新查。 */
 let metaCache: { generation: number; promise: Promise<TokenMeta> } | null = null
 
-function getMeta(): Promise<TokenMeta> {
+export function getMeta(): Promise<TokenMeta> {
   const generation = backend.generation
   if (!metaCache || metaCache.generation !== generation) {
     const promise = discoverMeta(backend.getStatus().baseUrl)
@@ -140,10 +159,10 @@ function getMeta(): Promise<TokenMeta> {
   return metaCache.promise
 }
 
-export async function getModelInfo(): Promise<ModelInfo | null> {
+export async function getModelProfile(): Promise<ModelProfile | null> {
   if (backend.getStatus().state !== 'ready') return null
   try {
-    return (await getMeta()).info
+    return (await getMeta()).profile
   } catch {
     return null
   }
@@ -281,11 +300,11 @@ export async function getCandidates(raw: unknown): Promise<Candidate[]> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt: req.prompt, // 前端已拼好（纯文本或 ChatML），原样转发，不再套模板
+        prompt: req.prompt, // 前端已按 ModelProfile.template 拼好，原样转发，不再套模板
         n_predict: 1, // 只要「下一个 token」的分布
         n_probs: req.topK + EXTRA_PROBS,
         cache_prompt: true, // 复用与上一次请求相同的前缀
-        id_slot: 0, // 固定一个 slot，配合 --parallel 1
+        id_slot: 0, // 候选固定用槽 0；纠错等后台任务用槽 1（见 llm.ts），互不抢缓存
         temperature: 1.0,
         stream: false
       }),

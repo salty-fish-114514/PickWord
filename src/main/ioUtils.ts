@@ -13,6 +13,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { Anchor, DocumentPayload } from '../shared/ipc'
+import { parseChapterOutlines, parseMaterials, parseOutlineSegments } from '../shared/materials'
 
 /* ───────── 类型守卫 ───────── */
 
@@ -88,19 +89,8 @@ export function createSerializedQueue(): SerializedQueue {
   return { serialized, whenIdle }
 }
 
-/* ───────── 文件名消毒 ───────── */
-
-/** 标题 → 合法 Windows 文件名（不含扩展名）。 */
-export function safeFileName(title: string): string {
-  let name = title
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
-    .trim()
-    .replace(/[. ]+$/, '')
-    .slice(0, 80)
-  if (!name) name = '未命名'
-  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(name)) name = `_${name}`
-  return name
-}
+/* 文件名消毒：见 shared/text.ts 的 safeFileName（主进程与 renderer 共用） */
+export { safeFileName } from '../shared/text'
 
 /* ───────── 锚点解析 ───────── */
 
@@ -130,6 +120,9 @@ export function validateDocument(raw: unknown): DocumentPayload {
     outlineText: str(raw.outlineText),
     styleEnabled: raw.styleEnabled === true,
     outlineEnabled: raw.outlineEnabled === true,
+    outlineSegments: parseOutlineSegments(raw.outlineSegments),
     anchor: parseAnchor(raw.anchor),
+    chapterOutlines: parseChapterOutlines(raw.chapterOutlines),
+    materials: parseMaterials(raw.materials),
   }
 }

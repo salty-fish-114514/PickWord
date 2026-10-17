@@ -1,56 +1,90 @@
+/**
+ * 一键部署：下载引擎（多镜像）、下载 / 复用模型、写入 backend.json。
+ * 下载清单来自 catalog.ts；配置写入走 backendConfig.ts；是否重启后端由调用方（index.ts）决定。
+ */
 import { net } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { BackendKind } from '../shared/ipc'
+import type { BackendConfig, DeployConfig } from '../shared/ipc'
+import {
+  buildDefaultArgs,
+  DEFAULT_CONTEXT_LENGTH,
+  DEFAULT_PORT,
+  DEFAULT_STARTUP_TIMEOUT_SEC
+} from '../shared/backendArgs'
+import { writeBackendConfig } from './backendConfig'
+import { engineAssetsFor, isOfficialBase, MIRROR_BASES } from './catalog'
 import { broadcast, cleanupPartialDownload, downloadFile, extractZip } from './downloader'
-import { getBackendConfigDir } from './setup'
+import { isObj } from './ioUtils'
 
-/** 部署配置的输入参数 */
-export interface DeployConfig {
-  targetDir: string
-  backendKind: BackendKind
-  cudaVersion?: '12.4' | '13.x'
-  modelUrl: string
-  localModelPath?: string
-  localExePath?: string
-  threads: number
+/* ───────── 入参校验（主进程不信任页面数据） ───────── */
+
+const BACKEND_KINDS = ['cuda', 'rocm', 'vulkan', 'cpu'] as const
+
+export function parseDeployConfig(raw: unknown): DeployConfig {
+  if (!isObj(raw)) throw new Error('部署参数格式错误')
+  const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+
+  const backendKind = str(raw.backendKind)
+  if (!(BACKEND_KINDS as readonly string[]).includes(backendKind)) throw new Error('未知的后端类型')
+
+  const threads = Math.round(Number(raw.threads))
+  if (!Number.isInteger(threads) || threads < 1 || threads > 512) throw new Error('线程数必须是 1～512 的整数')
+
+  const ctxRaw = raw.contextLength === undefined ? DEFAULT_CONTEXT_LENGTH : Math.round(Number(raw.contextLength))
+  if (!Number.isInteger(ctxRaw) || ctxRaw < 512) throw new Error('上下文长度无效')
+
+  const modelUrl = str(raw.modelUrl)
+  if (modelUrl && !/^https?:\/\//i.test(modelUrl)) throw new Error('模型下载地址必须是 http(s) 链接')
+
+  const localExePath = str(raw.localExePath)
+  const localModelPath = str(raw.localModelPath)
+  const targetDir = str(raw.targetDir)
+  if (!localExePath && !targetDir) throw new Error('请指定文件存放目录')
+  if (modelUrl && !targetDir) throw new Error('下载模型需要指定文件存放目录')
+  if (!modelUrl && !localModelPath) throw new Error('请选择一个模型')
+
+  return {
+    targetDir,
+    backendKind: backendKind as DeployConfig['backendKind'],
+    cudaVersion: raw.cudaVersion === '13.x' ? '13.x' : raw.cudaVersion === '12.4' ? '12.4' : undefined,
+    modelUrl,
+    localModelPath: localModelPath || undefined,
+    localExePath: localExePath || undefined,
+    threads,
+    contextLength: ctxRaw
+  }
 }
 
-/** 下载源状态管理 */
-type SetupDownloadSourceState = {
+/* ───────── 多镜像下载 ───────── */
+
+type SourceState = {
   preferredBase: string | null
   officialProbe: 'unknown' | 'available' | 'unavailable'
 }
 
-// 每次部署都有独立状态：以这次部署的 AbortSignal 为键
-const downloadSourceStates = new WeakMap<AbortSignal, SetupDownloadSourceState>()
-
-const OFFICIAL_RELEASE_PREFIX =
-  'https://github.com/ggml-org/llama.cpp/releases/download/'
+// 每次部署独立状态：以这次部署的 AbortSignal 为键
+const sourceStates = new WeakMap<AbortSignal, SourceState>()
 const OFFICIAL_PROBE_TIMEOUT_MS = 5_000
 
-/** 5 秒内能读到第一个字节，才视为 GitHub 官方源可用 */
+/** 5 秒内能读到第一个字节，才视为 GitHub 官方源可用。 */
 async function probeOfficialUrl(url: string, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) throw new Error('用户取消了部署')
-
-  const probeController = new AbortController()
+  const probe = new AbortController()
+  const forwardAbort = (): void => probe.abort()
+  signal.addEventListener('abort', forwardAbort, { once: true })
+  const timer = setTimeout(() => probe.abort(), OFFICIAL_PROBE_TIMEOUT_MS)
   let response: Response | undefined
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-
-  const forwardAbort = (): void => probeController.abort()
-  signal.addEventListener('abort', forwardAbort, { once: true })
-  const timer = setTimeout(() => probeController.abort(), OFFICIAL_PROBE_TIMEOUT_MS)
-
   try {
     response = await net.fetch(url, {
       method: 'GET',
       headers: { Range: 'bytes=0-0' },
       redirect: 'follow',
       cache: 'no-store',
-      signal: probeController.signal
+      signal: probe.signal
     })
     if (!response.ok || !response.body) return false
-
     reader = response.body.getReader()
     const { done, value } = await reader.read()
     return !done && (value?.byteLength ?? 0) > 0
@@ -63,18 +97,18 @@ async function probeOfficialUrl(url: string, signal: AbortSignal): Promise<boole
     try {
       if (reader) void reader.cancel().catch(() => {})
       else if (response?.body) void response.body.cancel().catch(() => {})
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 }
 
 /**
  * 依次尝试多个镜像源下载，全部失败才报错。
- * 先探测 GitHub 官方源，再依次尝试镜像。
- * 每个源内部最多尝试 3 次；换源时从已下载的位置续传。
- * 所有源都失败或用户取消时，删除临时文件。
+ * 先探测官方源，再依次尝试镜像；换源时从已下载的位置续传；全部失败或取消时删除临时文件。
  */
 export async function downloadWithMirrors(
-  mirrors: string[],
+  mirrors: readonly string[],
   filename: string,
   destPath: string,
   uiLabel: string,
@@ -83,11 +117,10 @@ export async function downloadWithMirrors(
   fractionWeight: number
 ): Promise<void> {
   const errors: string[] = []
-
-  let state = downloadSourceStates.get(signal)
+  let state = sourceStates.get(signal)
   if (!state) {
     state = { preferredBase: null, officialProbe: 'unknown' }
-    downloadSourceStates.set(signal, state)
+    sourceStates.set(signal, state)
   }
 
   // 清理上次程序崩溃可能留下的临时文件，本次从头下载
@@ -95,7 +128,7 @@ export async function downloadWithMirrors(
 
   try {
     const uniqueBases = [...new Set(mirrors)]
-    const officialBase = uniqueBases.find((b) => b.startsWith(OFFICIAL_RELEASE_PREFIX))
+    const officialBase = uniqueBases.find(isOfficialBase)
     const proxyBases = uniqueBases.filter((b) => b !== officialBase)
 
     if (officialBase && !state.preferredBase && state.officialProbe === 'unknown') {
@@ -108,10 +141,7 @@ export async function downloadWithMirrors(
       const reachable = await probeOfficialUrl(officialBase + filename, signal)
       if (signal.aborted) throw new Error('用户取消了部署')
       state.officialProbe = reachable ? 'available' : 'unavailable'
-      if (!reachable) {
-        errors.push(`${officialBase}${filename} → 官方源探测未通过，跳过直连`)
-        console.warn('[下载源切换] GitHub 官方源探测未通过，改用镜像')
-      }
+      if (!reachable) errors.push(`${officialBase}${filename} → 官方源探测未通过，跳过直连`)
     }
 
     const sources: Array<{ base: string; label: string; official: boolean }> = []
@@ -121,27 +151,17 @@ export async function downloadWithMirrors(
       added.add(base)
       sources.push({ base, label, official })
     }
-
-    // CUDA 运行时优先复用主包下载成功的源
+    // 后续文件优先复用上一个文件下载成功的源
     if (state.preferredBase) {
-      const isOfficial = state.preferredBase === officialBase
-      addSource(
-        state.preferredBase,
-        isOfficial ? '（GitHub 直连，复用）' : '（上次成功源，复用）',
-        isOfficial
-      )
+      const official = state.preferredBase === officialBase
+      addSource(state.preferredBase, official ? '（GitHub 直连，复用）' : '（上次成功源，复用）', official)
     }
-    if (officialBase && state.officialProbe === 'available') {
-      addSource(officialBase, '（GitHub 直连）', true)
-    }
-    for (let i = 0; i < proxyBases.length; i++) {
-      addSource(proxyBases[i], `（镜像 ${i + 1}/${proxyBases.length}）`, false)
-    }
+    if (officialBase && state.officialProbe === 'available') addSource(officialBase, '（GitHub 直连）', true)
+    proxyBases.forEach((base, i) => addSource(base, `（镜像 ${i + 1}/${proxyBases.length}）`, false))
 
     for (const source of sources) {
       if (signal.aborted) throw new Error('用户取消了部署')
       const url = source.base + filename
-
       try {
         await downloadFile(
           url,
@@ -150,10 +170,10 @@ export async function downloadWithMirrors(
           signal,
           fractionBase,
           fractionWeight,
-          undefined,  // stallTimeoutMs：默认 15 秒
-          undefined,  // maxRetries：默认 3 次
-          undefined,  // connectTimeoutMs：默认 10 秒
-          true        // 失败时保留临时文件，交给下一个源续传
+          undefined, // stallTimeoutMs：默认 15 秒
+          undefined, // maxRetries：默认 3 次
+          undefined, // connectTimeoutMs：默认 10 秒
+          true // 失败时保留临时文件，交给下一个源续传
         )
         state.preferredBase = source.base
         return
@@ -166,137 +186,75 @@ export async function downloadWithMirrors(
         if (state.preferredBase === source.base) state.preferredBase = null
       }
     }
-
     throw new Error(`所有下载源均失败：\n${errors.join('\n')}`)
   } catch (err) {
-    // 所有源都失败或用户取消：不留临时文件
     await cleanupPartialDownload(destPath)
     if (signal.aborted) throw new Error('用户取消了部署')
     throw err
   }
 }
 
-/**
- * 执行部署：下载引擎、模型，写入配置。
- * 返回部署结果信息。
- */
-export async function executeDeploy(config: DeployConfig, signal: AbortSignal): Promise<void> {
+/* ───────── 部署主流程 ───────── */
+
+/** 执行部署：下载引擎、模型，写入配置。返回写入的配置。 */
+export async function executeDeploy(config: DeployConfig, signal: AbortSignal): Promise<BackendConfig> {
   const { targetDir, backendKind, cudaVersion, modelUrl, localModelPath, localExePath, threads } = config
 
-  fs.mkdirSync(targetDir, { recursive: true })
+  if (targetDir) fs.mkdirSync(targetDir, { recursive: true })
 
   let exePath: string
-
   if (localExePath) {
-    // ── 用户自带 llama-server.exe ──
-    if (!fs.existsSync(localExePath)) {
-      throw new Error(`找不到指定的后端程序：${localExePath}`)
-    }
+    if (!fs.existsSync(localExePath)) throw new Error(`找不到指定的后端程序：${localExePath}`)
     exePath = localExePath
   } else {
-    // ── 下载官方预编译 ──
-    const LLAMA_TAG = 'b8868'
-    let llamaAsset = `llama-${LLAMA_TAG}-bin-win-cpu-x64.zip`
-    let cudartAsset: string | null = null
-
-    if (backendKind === 'rocm') {
-      llamaAsset = `llama-${LLAMA_TAG}-bin-win-hip-radeon-x64.zip`
-    } else if (backendKind === 'vulkan') {
-      llamaAsset = `llama-${LLAMA_TAG}-bin-win-vulkan-x64.zip`
-    } else if (backendKind === 'cuda') {
-      const ver = cudaVersion === '13.x' ? '13.1' : '12.4'
-      llamaAsset = `llama-${LLAMA_TAG}-bin-win-cuda-${ver}-x64.zip`
-      cudartAsset = `cudart-llama-bin-win-cuda-${ver}-x64.zip`
-    }
-
-    const officialBase =
-      `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`
-
-    // 会先探测 officialBase；不通时再按下面的顺序尝试镜像
-    const mirrors = [
-      `https://gh.llkk.cc/${officialBase}`,
-      `https://gh.idayer.com/${officialBase}`,
-      `https://ghfast.top/${officialBase}`,
-      `https://ghproxy.homeboyc.cn/${officialBase}`,
-      `https://ghproxy.net/${officialBase}`,
-      `https://gh-proxy.com/${officialBase}`,
-      `https://ghp.ci/${officialBase}`,
-      `https://github.akams.cn/${officialBase}`,
-      `https://moeyy.cn/gh-proxy/${officialBase}`,
-      `https://mirror.ghproxy.com/${officialBase}`,
-      `https://ghproxy.cxkpro.top/${officialBase}`,
-      officialBase,
-    ]
-
+    const assets = engineAssetsFor(backendKind, cudaVersion)
     const exeDir = path.join(targetDir, 'llama-cpp')
     fs.mkdirSync(exeDir, { recursive: true })
 
-    // 下载主包（依次尝试多个镜像源）
-    const llamaZipPath = path.join(targetDir, llamaAsset)
-    if (!fs.existsSync(llamaZipPath)) {
-      await downloadWithMirrors(mirrors, llamaAsset, llamaZipPath, `引擎: ${llamaAsset}`, signal, 0.0, 0.12)
+    const llamaZip = path.join(targetDir, assets.llama)
+    if (!fs.existsSync(llamaZip)) {
+      await downloadWithMirrors(MIRROR_BASES, assets.llama, llamaZip, `引擎: ${assets.llama}`, signal, 0.0, 0.12)
     }
-
     broadcast('setup:progress', { filename: '正在解压引擎…', receivedBytes: 0, totalBytes: 0, overallFraction: 0.13 })
-    await extractZip(llamaZipPath, exeDir, signal)
+    await extractZip(llamaZip, exeDir, signal)
 
-    // CUDA 运行时 DLL
-    if (cudartAsset) {
-      const cudartZipPath = path.join(targetDir, cudartAsset)
-      if (!fs.existsSync(cudartZipPath)) {
-        await downloadWithMirrors(mirrors, cudartAsset, cudartZipPath, `CUDA 运行时: ${cudartAsset}`, signal, 0.15, 0.05)
+    if (assets.cudart) {
+      const cudartZip = path.join(targetDir, assets.cudart)
+      if (!fs.existsSync(cudartZip)) {
+        await downloadWithMirrors(MIRROR_BASES, assets.cudart, cudartZip, `CUDA 运行时: ${assets.cudart}`, signal, 0.15, 0.05)
       }
       broadcast('setup:progress', { filename: '正在解压 CUDA 运行时…', receivedBytes: 0, totalBytes: 0, overallFraction: 0.21 })
-      await extractZip(cudartZipPath, exeDir, signal)
+      await extractZip(cudartZip, exeDir, signal)
     }
 
     exePath = path.join(exeDir, 'llama-server.exe')
-    if (!fs.existsSync(exePath)) {
-      throw new Error(`解压后找不到 llama-server.exe，请检查 ${exeDir} 目录结构`)
-    }
+    if (!fs.existsSync(exePath)) throw new Error(`解压后找不到 llama-server.exe，请检查 ${exeDir} 目录结构`)
   }
 
-  // ── 模型 ──
-  let finalModelPath = ''
+  let modelPath: string
   if (modelUrl) {
-    const modelFilename = decodeURIComponent(new URL(modelUrl).pathname.split('/').pop() || 'model.gguf')
-    finalModelPath = path.join(targetDir, modelFilename)
-    if (!fs.existsSync(finalModelPath)) {
-      await downloadFile(modelUrl, finalModelPath, `模型: ${modelFilename}`, signal, 0.22, 0.73)
+    const filename = decodeURIComponent(new URL(modelUrl).pathname.split('/').pop() || 'model.gguf')
+    modelPath = path.join(targetDir, filename)
+    if (!fs.existsSync(modelPath)) {
+      await downloadFile(modelUrl, modelPath, `模型: ${filename}`, signal, 0.22, 0.73)
     }
   } else if (localModelPath) {
-    if (!fs.existsSync(localModelPath)) {
-      throw new Error(`找不到指定的模型文件：${localModelPath}`)
-    }
-    finalModelPath = localModelPath
+    if (!fs.existsSync(localModelPath)) throw new Error(`找不到指定的模型文件：${localModelPath}`)
+    modelPath = localModelPath
     broadcast('setup:progress', { filename: '使用已有本地模型', receivedBytes: 0, totalBytes: 0, overallFraction: 0.95 })
   } else {
     throw new Error('请选择一个模型')
   }
 
-  // ── 写入配置 ──
-  // 注意：不在此处自动添加 --device 参数。
-  // llama.cpp 的设备名（ROCm0/CUDA0/Vulkan0）取决于编译时启用的后端，
-  // 无法从操作系统信息推断。部署后用 --list-devices 让用户自己选择。
-  // 用户通过 UI 选择设备后，由 setup:update-device IPC 单独写入配置。
-  const args = ['-c', '16384', '-t', String(threads), '-fa', 'on', '--parallel', '1']
-
-  const configDir = getBackendConfigDir()
-  fs.mkdirSync(configDir, { recursive: true })
-
-  const backendJson = {
+  // 不在此处写 --device：设备名取决于 llama.cpp 编译后端，部署后用 --list-devices 让用户选。
+  const written = await writeBackendConfig({
     exe: exePath,
-    model: finalModelPath,
-    port: 18765,
-    args,
-    startupTimeoutSec: 600
-  }
-
-  fs.writeFileSync(
-    path.join(configDir, 'backend.json'),
-    JSON.stringify(backendJson, null, 2),
-    'utf8'
-  )
+    model: modelPath,
+    port: DEFAULT_PORT,
+    args: buildDefaultArgs(threads, config.contextLength ?? DEFAULT_CONTEXT_LENGTH),
+    startupTimeoutSec: DEFAULT_STARTUP_TIMEOUT_SEC
+  })
 
   broadcast('setup:progress', { filename: '配置完成！', receivedBytes: 0, totalBytes: 0, overallFraction: 1.0 })
+  return written
 }
