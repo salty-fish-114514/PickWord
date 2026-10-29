@@ -548,13 +548,13 @@ function recommend(
 
   const amd = gpus.find((g) => g.vendor === 'amd')
   if (amd) {
-    warnings.push(
-      'HIP/ROCm 后端只正式支持部分 AMD 显卡型号;如果启动失败,请改用 Vulkan 后端(速度较慢但兼容性好)。'
-    )
+    // 不再默认 HIP/ROCm:llama.cpp 的 Windows HIP 包只带了 gfx1030 / gfx1100-1103 / gfx1150-1151 /
+    // gfx1200-1201 的 BLAS 内核,RX 6600/6700/6750(gfx1031/1032)这类卡根本起不来;
+    // 而 Windows 上 HSA_OVERRIDE_GFX_VERSION 不生效,没有补救办法。Vulkan 则所有 RDNA 都能用。
     return {
       ...base,
-      kind: 'rocm',
-      reason: `检测到 ${amd.name},优先尝试 HIP/Radeon 后端,失败可回落 Vulkan。`
+      kind: 'vulkan',
+      reason: `检测到 ${amd.name},使用 Vulkan 后端(所有 RDNA 显卡通用)。HIP/ROCm 只对部分型号有效,可在下一步手动选择。`
     }
   }
 

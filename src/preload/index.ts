@@ -6,25 +6,7 @@
  * `WriterApi` 直接取自这里的 api 对象（见 index.d.ts），renderer 不再手写一份镜像接口。
  */
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import type {
-  BackendConfig,
-  BackendProgress,
-  BackendStatus,
-  CandidateRequest,
-  ChoosePathOptions,
-  CompletionRequest,
-  DeployConfig,
-  DocumentPayload,
-  ExpandChunk,
-  ExpandRequest,
-  IpcInvokeArgs,
-  IpcInvokeChannel,
-  IpcInvokeResult,
-  IpcPushMap,
-  IpcSendMap,
-  LibraryFormat,
-  UiBackendStatus
-} from '../shared/ipc'
+import type { BackendConfig, BackendKind, BackendProgress, BackendStatus, CandidateRequest, ChoosePathOptions, CompletionRequest, DeployConfig, DocumentPayload, ExpandChunk, ExpandRequest, IpcInvokeArgs, IpcInvokeChannel, IpcInvokeResult, IpcPushMap, IpcSendMap, LibraryFormat, UiBackendStatus, UpdateInfo } from '../shared/ipc'
 
 /* ───────── 类型化的 ipcRenderer 封装 ───────── */
 
@@ -73,8 +55,17 @@ const api = {
   /** 整体替换 backend.json 并重启后端（首页「模型与推理」面板） */
   applyBackendConfig: (config: BackendConfig) => invoke('setup:apply-config', config),
   deployBackend: (config: DeployConfig) => invoke('setup:deploy', config),
+  /** 换引擎：模型不动，只补下载引擎包；成功后由主进程重启后端。 */
+  switchBackendEngine: (kind: BackendKind) => invoke('setup:switch-engine', kind),
   cancelDeploy: () => send('setup:cancel-deploy'),
   onDeployProgress: (listener: (p: IpcPushMap['setup:progress']) => void) => on('setup:progress', listener),
+
+  // ─── 检查更新（GitHub Release；镜像下载失败自动降级为「只提示」） ───
+  appVersion: () => invoke('app:version'),
+  checkUpdate: () => invoke('update:check'),
+  downloadUpdate: (info: UpdateInfo) => invoke('update:download', info),
+  installUpdate: (exePath: string) => invoke('update:install', exePath),
+  onUpdateProgress: (listener: (p: IpcPushMap['update:progress']) => void) => on('update:progress', listener),
 
   // ─── 系统对话框 / 文件路径 ───
   choosePath: (options: ChoosePathOptions) => invoke('dialog:choose-path', options),
@@ -98,6 +89,8 @@ const api = {
 
   // ─── 后端状态与加载进度 ───
   getBackendStatus: async (): Promise<UiBackendStatus> => toUiStatus(await invoke('backend:get-status')),
+  /** 原始状态（含 message），向导判断启动失败原因时用。 */
+  getBackendDetail: () => invoke('backend:get-detail'),
   onBackendStatus: (listener: (status: UiBackendStatus) => void) =>
     on('backend:status', (status) => {
       console.info('[backend]', status.state, status.message)

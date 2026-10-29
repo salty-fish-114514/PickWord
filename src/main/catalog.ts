@@ -14,21 +14,29 @@ const OFFICIAL_RELEASE_PREFIX = 'https://github.com/ggml-org/llama.cpp/releases/
 
 export const OFFICIAL_BASE = `${OFFICIAL_RELEASE_PREFIX}${LLAMA_TAG}/`
 
-/** 先探测 OFFICIAL_BASE；不通时按此顺序尝试镜像（最后再回到官方源兜底）。 */
-export const MIRROR_BASES: readonly string[] = [
-  `https://gh.llkk.cc/${OFFICIAL_BASE}`,
-  `https://gh.idayer.com/${OFFICIAL_BASE}`,
-  `https://ghfast.top/${OFFICIAL_BASE}`,
-  `https://ghproxy.homeboyc.cn/${OFFICIAL_BASE}`,
-  `https://ghproxy.net/${OFFICIAL_BASE}`,
-  `https://gh-proxy.com/${OFFICIAL_BASE}`,
-  `https://ghp.ci/${OFFICIAL_BASE}`,
-  `https://github.akams.cn/${OFFICIAL_BASE}`,
-  `https://moeyy.cn/gh-proxy/${OFFICIAL_BASE}`,
-  `https://mirror.ghproxy.com/${OFFICIAL_BASE}`,
-  `https://ghproxy.cxkpro.top/${OFFICIAL_BASE}`,
-  OFFICIAL_BASE
+/** GitHub 代理前缀：下载 llama.cpp 组件与 Release 更新包共用同一批镜像。 */
+export const GH_PROXY_PREFIXES: readonly string[] = [
+  'https://gh.llkk.cc/',
+  'https://gh.idayer.com/',
+  'https://ghfast.top/',
+  'https://ghproxy.homeboyc.cn/',
+  'https://ghproxy.net/',
+  'https://gh-proxy.com/',
+  'https://ghp.ci/',
+  'https://github.akams.cn/',
+  'https://moeyy.cn/gh-proxy/',
+  'https://mirror.ghproxy.com/',
+  'https://ghproxy.cxkpro.top/'
 ]
+
+/** 给一个 GitHub 直链生成「直链 + 各镜像」的尝试顺序（官方直链放最后兜底，与组件下载一致）。 */
+export function withGhMirrors(url: string): string[] {
+  return [...GH_PROXY_PREFIXES.map((prefix) => prefix + url), url]
+}
+
+/** 先探测 OFFICIAL_BASE；不通时按此顺序尝试镜像（最后再回到官方源兜底）。 */
+export const MIRROR_BASES: readonly string[] = [...GH_PROXY_PREFIXES.map((prefix) => prefix + OFFICIAL_BASE), OFFICIAL_BASE]
+
 
 export function isOfficialBase(base: string): boolean {
   return base.startsWith(OFFICIAL_RELEASE_PREFIX)

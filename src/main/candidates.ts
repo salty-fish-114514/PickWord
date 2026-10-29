@@ -113,8 +113,8 @@ async function discoverMeta(baseUrl: string): Promise<TokenMeta> {
   const slots = slotsFromServer && slotsFromServer > 0 ? Math.round(slotsFromServer) : fromArgs.slots
   const modelName = (asStr(p.model_path) ?? '').split(/[\\/]/).pop() ?? ''
   const template = detectPromptTemplate(asStr(p.chat_template) ?? '', modelName)
-  // 有思考开关的模型（Qwen3.5 等）：指令类任务的 assistant 回合要以空思考块开头，否则文法约束下会坍缩成「无」
-  //（见 ModelProfile.noThinkPrefix 的事故记录）。候选续写不用它。
+  // 有思考开关的模型（Qwen3 / Qwen3.5 等）：assistant 回合要以空思考块开头，否则文法约束下会坍缩成「无」
+  //（见 ModelProfile.noThinkPrefix 的事故记录）。候选续写与纠错用的是同一个字面量，renderer 两边都接上。
   const noThinkPrefix = detectNoThinkPrefix(asStr(p.chat_template) ?? '', modelName)
 
   const eosTexts = new Set(DEFAULT_EOS_TEXTS)

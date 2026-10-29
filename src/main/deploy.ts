@@ -208,7 +208,9 @@ export async function executeDeploy(config: DeployConfig, signal: AbortSignal): 
     exePath = localExePath
   } else {
     const assets = engineAssetsFor(backendKind, cudaVersion)
-    const exeDir = path.join(targetDir, 'llama-cpp')
+    // 每种引擎一个目录：换引擎时两套 DLL 不会混在一起（HIP 的 ggml-hip.dll 解压后 567 MB，
+    // 留在同目录里会被 GGML_BACKEND_DL 反复尝试加载）。
+    const exeDir = path.join(targetDir, `llama-cpp-${backendKind}`)
     fs.mkdirSync(exeDir, { recursive: true })
 
     const llamaZip = path.join(targetDir, assets.llama)
@@ -252,7 +254,8 @@ export async function executeDeploy(config: DeployConfig, signal: AbortSignal): 
     model: modelPath,
     port: DEFAULT_PORT,
     args: buildDefaultArgs(threads, config.contextLength ?? DEFAULT_CONTEXT_LENGTH),
-    startupTimeoutSec: DEFAULT_STARTUP_TIMEOUT_SEC
+    startupTimeoutSec: DEFAULT_STARTUP_TIMEOUT_SEC,
+    kind: backendKind
   })
 
   broadcast('setup:progress', { filename: '配置完成！', receivedBytes: 0, totalBytes: 0, overallFraction: 1.0 })

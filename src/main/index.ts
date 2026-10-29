@@ -1,11 +1,12 @@
 import { app, dialog, shell, BrowserWindow, ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron'
-import { join } from 'path'
+import fs from 'node:fs'
+import { basename, dirname, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import type { ChoosePathOptions, IpcInvokeArgs, IpcInvokeChannel, IpcInvokeResult, IpcSendMap } from '../shared/ipc'
-import { removeArg, setArgValue } from '../shared/backendArgs'
+import { DEFAULT_CONTEXT_LENGTH, getArgNumber, removeArg, setArgValue } from '../shared/backendArgs'
 import { backend } from './backend'
-import { updateBackendConfig, writeBackendConfig } from './backendConfig'
+import { readBackendConfig, resolveConfigPath, updateBackendConfig, writeBackendConfig } from './backendConfig'
 import { cancelCandidates, getCandidates, getModelProfile } from './candidates'
 import { cancelCompletion, complete } from './llm'
 import { cancelExpand, expand } from './expand'
@@ -17,6 +18,7 @@ import * as docs from './documents'
 import { detectHardware } from './hardware'
 import * as lib from './library'
 import { getSetupState } from './setup'
+import * as updater from './updater'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -192,9 +194,46 @@ if (!app.requestSingleInstanceLock()) {
       deployAbort?.abort()
       deployAbort = null
     })
+    // 换引擎（向导第 4 步「看不到显卡」时的一键修复）：模型不动，只补下载新引擎包。
+    // 新引擎的设备名不同（ROCm0 / Vulkan0），所以 --device 一并清掉，由用户重新选。
+    handle('setup:switch-engine', async (_win, kind) => {
+      if (kind !== 'vulkan' && kind !== 'cpu') throw new Error('只支持一键切换到 Vulkan / 纯 CPU 引擎')
+      const current = readBackendConfig()
+      if (!current.ok) throw new Error(current.message)
+      const cfg = current.config
+      const engineDir = dirname(resolveConfigPath(cfg.exe))
+      if (!basename(engineDir).startsWith('llama-cpp')) {
+        throw new Error('当前用的是自带的 llama-server，不能在向导里一键换引擎；请回到第 2 步重新选择并部署')
+      }
+      const modelPath = resolveConfigPath(cfg.model)
+      if (!fs.existsSync(modelPath)) throw new Error('找不到模型文件，请回到第 2 步重新部署')
+
+      if (deployAbort) deployAbort.abort()
+      const controller = new AbortController()
+      deployAbort = controller
+      backend.stop(true)
+      try {
+        const written = await executeDeploy(
+          {
+            targetDir: dirname(engineDir),
+            backendKind: kind,
+            modelUrl: '',
+            localModelPath: modelPath,
+            threads: getArgNumber(cfg.args, '-t') ?? 4,
+            contextLength: getArgNumber(cfg.args, '-c') ?? DEFAULT_CONTEXT_LENGTH
+          },
+          controller.signal
+        )
+        void backend.restart()
+        return written
+      } finally {
+        if (deployAbort === controller) deployAbort = null
+      }
+    })
 
     // —— 后端状态与加载进度 ——
     handle('backend:get-status', () => backend.getStatus())
+    handle('backend:get-detail', () => backend.getStatus())
     handle('backend:get-progress', () => backend.getProgress())
     handle('backend:restart', () => void backend.restart())
     handle('backend:open-log', () => shell.showItemInFolder(backend.logFile))
@@ -228,6 +267,20 @@ if (!app.requestSingleInstanceLock()) {
     handle('library:directory', () => lib.getLibraryDirectory())
     handle('library:choose-directory', (win) => lib.chooseLibraryDirectory(win))
     handle('library:reset-directory', () => lib.resetLibraryDirectory())
+
+    // ---- 检查更新与自动覆盖安装（GitHub Release；镜像失败自动降级为「只提示」） ----
+    handle('app:version', () => app.getVersion())
+    handle('update:check', () => updater.checkUpdate())
+    handle('update:download', (win, info) =>
+      updater.downloadUpdate(info).then((file) => {
+        // 下载完成再推一次，让进度条走到头
+        win.webContents.send('update:progress', { received: 1, total: 1, source: -1 })
+        return file
+      })
+    )
+    handle('update:install', (_win, exePath) => {
+      updater.installUpdate(exePath)
+    })
 
     createWindow()
 

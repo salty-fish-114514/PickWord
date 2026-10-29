@@ -22,6 +22,14 @@ import {
 } from '../shared/backendArgs'
 import { isObj, writeFileAtomic } from './ioUtils'
 
+const BACKEND_KINDS = ['cuda', 'rocm', 'vulkan', 'cpu'] as const
+type EngineKind = (typeof BACKEND_KINDS)[number]
+
+/** 认不出来的 kind（手改配置写错）当作没有：它只影响界面措辞，不影响启动。 */
+function pickKind(value: unknown): EngineKind | undefined {
+  return typeof value === 'string' ? BACKEND_KINDS.find((kind) => kind === value) : undefined
+}
+
 export function getBackendConfigDir(): string {
   return app.isPackaged
     ? path.join(app.getPath('userData'), 'backend')
@@ -99,12 +107,14 @@ export function parseBackendConfig(raw: unknown): BackendConfig {
   if (argsError) throw new Error(argsError)
 
   const timeout = Number(raw.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC)
+  const kind = pickKind(raw.kind)
   return {
     exe,
     model,
     port,
     args,
-    startupTimeoutSec: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_STARTUP_TIMEOUT_SEC
+    startupTimeoutSec: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_STARTUP_TIMEOUT_SEC,
+    ...(kind ? { kind } : {})
   }
 }
 
@@ -130,12 +140,14 @@ export function readBackendConfig(): BackendConfigReadResult {
       const exe = typeof parsed.exe === 'string' ? parsed.exe.trim() : ''
       const model = typeof parsed.model === 'string' ? parsed.model.trim() : ''
       if (exe && model) {
+        const kind = pickKind(parsed.kind)
         recovered = {
           exe,
           model,
           port: Number(parsed.port ?? DEFAULT_PORT) || DEFAULT_PORT,
           args: Array.isArray(parsed.args) ? parsed.args.map(String) : [],
-          startupTimeoutSec: Number(parsed.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC) || DEFAULT_STARTUP_TIMEOUT_SEC
+          startupTimeoutSec: Number(parsed.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC) || DEFAULT_STARTUP_TIMEOUT_SEC,
+          ...(kind ? { kind } : {})
         }
       }
     } else {

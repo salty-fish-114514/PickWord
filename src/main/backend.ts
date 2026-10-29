@@ -159,7 +159,12 @@ class LlamaBackend {
         shell: false
       })
       this.child = child
-      this.lastExit = new Promise((resolve) => child.once('exit', () => resolve()))
+      // exit 与 error 都要接：启动就失败（比如 exe 没有执行权限）时只会触发 error，
+      // 只等 exit 会让下一次重启白等满 8 秒才把错误报给用户看。
+      this.lastExit = new Promise((resolve) => {
+        child.once('exit', () => resolve())
+        child.once('error', () => resolve())
+      })
       child.stdout?.on('data', (chunk: Buffer) => this.feedOutput(chunk.toString('utf8'), 'stdoutBuf'))
       child.stderr?.on('data', (chunk: Buffer) => this.feedOutput(chunk.toString('utf8'), 'stderrBuf'))
       fs.writeFileSync(this.pidFile, String(child.pid))
