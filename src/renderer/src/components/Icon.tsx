@@ -38,7 +38,7 @@ export type IconName =
   | "clipboard"
   | "scissors"
   | "text"
-  | "textSize";
+  | "textSize"
 
 interface IconProps {
   name: IconName;

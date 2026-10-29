@@ -10,10 +10,10 @@ import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
 import { DevicePicker } from "./setup/DevicePicker";
 import { PathField, StatusNote } from "./setup/setupShared";
-import { errorText } from "./setup/setupUtils";
+import { BACKEND_KIND_LABEL, errorText } from "./setup/setupUtils";
 import { pickNativeFile } from "../lib/pathPicker";
 import { requireApi } from "../lib/platform";
-import type { BackendDeviceInfo } from "../lib/types";
+import type { BackendDeviceInfo, BackendKind } from "../lib/types";
 import {
   DEFAULT_CONTEXT_LENGTH,
   DEFAULT_PORT,
@@ -42,6 +42,8 @@ interface FormState {
   device: string;
   extraArgs: string;
   startupTimeoutSec: number;
+  /** 引擎类型只读带过去：面板不改它，但保存时不能丢（丢了就分不清装的是哪个引擎）。 */
+  kind?: BackendKind;
 }
 
 export function BackendSettingsPanel({ onClose, onRunSetupWizard }: BackendSettingsPanelProps) {
@@ -74,6 +76,7 @@ export function BackendSettingsPanel({ onClose, onRunSetupWizard }: BackendSetti
           device: parts.device ?? "",
           extraArgs: joinArgLine(parts.extra),
           startupTimeoutSec: cfg?.startupTimeoutSec ?? DEFAULT_STARTUP_TIMEOUT_SEC,
+          ...(cfg?.kind ? { kind: cfg.kind } : {}),
         });
         if (cfg?.exe) void queryDevices();
       })
@@ -142,6 +145,7 @@ export function BackendSettingsPanel({ onClose, onRunSetupWizard }: BackendSetti
         model: form.model.trim(),
         port: form.port,
         startupTimeoutSec: form.startupTimeoutSec,
+        ...(form.kind ? { kind: form.kind } : {}),
         args: composeArgs({
           threads: Math.round(form.threads),
           contextLength: Math.round(form.contextLength),
@@ -209,7 +213,11 @@ export function BackendSettingsPanel({ onClose, onRunSetupWizard }: BackendSetti
                 <button type="button" className="setup-secondary-button" disabled={querying || saving || !form.exe.trim()} onClick={() => void queryDevices()}>
                   {querying ? "查询中…" : "重新查询设备"}
                 </button>
-                <p className="setup-hint">设备列表来自上面填写的 llama-server；换了可执行文件请重新查询。</p>
+                <p className="setup-hint">
+                  设备列表来自上面填写的 llama-server；换了可执行文件请重新查询。
+                  {form.kind ? ` 当前引擎：${BACKEND_KIND_LABEL[form.kind]}。` : ""}
+                  {form.kind === "rocm" ? " 若这里为空、而系统认得出显卡，多半是这张卡不在 HIP 支持列表里，请重跑向导改用 Vulkan。" : ""}
+                </p>
               </div>
             </div>
 

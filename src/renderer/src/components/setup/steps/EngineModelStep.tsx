@@ -57,11 +57,17 @@ export function EngineModelStep({ form, catalog, recommendation, busy, onChange,
         <label>运行引擎</label>
         <select disabled={busy} value={form.backendKind} onChange={(e) => onChange({ backendKind: e.target.value as BackendKind })}>
           <option value="cuda">NVIDIA CUDA（最快）</option>
-          <option value="rocm">AMD HIP/ROCm（部分型号较快）</option>
-          <option value="vulkan">Vulkan（通用 GPU）</option>
+          <option value="rocm">AMD HIP/ROCm（实验性，仅部分型号）</option>
+          <option value="vulkan">Vulkan（通用 GPU，AMD 推荐）</option>
           <option value="cpu">纯 CPU</option>
         </select>
       </div>
+
+      {form.backendKind === "rocm" && (
+        <p className="setup-hint">
+          HIP 只对 RX 6800/6900、RX 7000/9000 系列等部分型号有效；RX 6600/6700/6750 这类旧架构请改用 Vulkan，否则第 4 步会看不到显卡。
+        </p>
+      )}
 
       {form.backendKind === "cuda" && (
         <div className="setup-form-row">

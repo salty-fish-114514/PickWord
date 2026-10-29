@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { AliasField, CardShell, FieldArea, ListToolbar } from "./shared";
 import { Icon } from "../Icon";
@@ -15,14 +15,40 @@ interface LoreTabProps {
 
 const CATEGORIES: LoreCategory[] = ["place", "org", "item", "other"];
 
-/** 「设定」：地点 / 组织 / 物品 / 其他 四类条目，结构比角色卡简单：名字 + 别名 + 一段说明。 */
+/**
+ * 「设定」：地点 / 组织 / 物品 / 其他 四类条目，结构比角色卡简单：名字 + 别名 + 一段说明。
+ * 与角色卡一样只做本地资料与统计（提及次数、重复提示白名单），内容不进提示词。
+ */
 export function LoreTab({ materials, onChange, text, selectedText }: LoreTabProps) {
   const [query, setQuery] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
   const [filter, setFilter] = useState<LoreCategory | "all">("all");
+  /** 拖动排序：与角色卡同一套（ref 兜底 drop 早于重渲染的情况）。 */
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+  const dragIdRef = useRef<string | null>(null);
 
   const entries = materials.lore;
   const mentions = useMemo(() => countMentions(entries, text), [entries, text]);
+
+  /**
+   * 把 fromId 挪到 toId 的位置。只在同一分类内重排：分类是条目自己的属性，不该被拖动改掉。
+   * 顺序就是数组顺序，随旁车 / book.json 一起存。
+   */
+  function moveEntry(fromId: string, toId: string) {
+    dragIdRef.current = null;
+    setDragId(null);
+    setOverId(null);
+    if (fromId === toId) return;
+    const fromIndex = entries.findIndex((entry) => entry.id === fromId);
+    const toIndex = entries.findIndex((entry) => entry.id === toId);
+    if (fromIndex < 0 || toIndex < 0 || entries[fromIndex].category !== entries[toIndex].category) return;
+    const entry = entries[fromIndex];
+    const next = entries.filter((_, index) => index !== fromIndex);
+    const insertAt = next.findIndex((item) => item.id === toId) + (fromIndex < toIndex ? 1 : 0);
+    next.splice(insertAt, 0, entry);
+    onChange({ ...materials, lore: next });
+  }
 
   const filtered = useMemo(() => {
     const term = query.trim();
@@ -67,7 +93,7 @@ export function LoreTab({ materials, onChange, text, selectedText }: LoreTabProp
       {entries.length === 0 && (
         <div className="chapter-empty">
           <p>还没有设定条目。</p>
-          <span>地名、门派、法宝、专有名词……名字出现在送入模型的正文里时，说明会自动随提示词注入。</span>
+          <span>地名、门派、法宝、专有名词……名字与别名会用于本地的提及统计和重复提示白名单，说明只给你自己看。</span>
         </div>
       )}
 
@@ -87,8 +113,24 @@ export function LoreTab({ materials, onChange, text, selectedText }: LoreTabProp
                 onToggle={() => setOpenId(openId === entry.id ? null : entry.id)}
                 title={entry.name}
                 meta={`${mentions.get(entry.id) ?? 0} 次`}
-                injected={entry.inject}
-                onInject={(next) => update(entry.id, { inject: next })}
+                drag={{
+                  dragging: dragId === entry.id,
+                  over: overId === entry.id && dragId !== entry.id,
+                  onStart: () => {
+                    dragIdRef.current = entry.id;
+                    setDragId(entry.id);
+                  },
+                  onEnter: () => setOverId(entry.id),
+                  onDrop: () => {
+                    const from = dragIdRef.current;
+                    if (from) moveEntry(from, entry.id);
+                  },
+                  onEnd: () => {
+                    dragIdRef.current = null;
+                    setDragId(null);
+                    setOverId(null);
+                  },
+                }}
               >
                 <label className="card-field card-field-inline">
                   <span className="card-field-label">名字</span>

@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from "react";
+import { useRef } from "react";
+import type { ReactNode } from "react";
 
 import { Icon } from "../Icon";
 import { parseAliases } from "../../lib/materials";
@@ -67,25 +68,61 @@ export function FieldArea({
   );
 }
 
-/** 别名输入：逗号 / 顿号分隔，失焦时规范化。 */
+/**
+ * 别名：一行一个、纵向铺开（不再挤在单行里横向滚动）。
+ * 失焦 / 回车时规范化：去空白、去重、丢掉空行；粘贴「甲、乙」这种带分隔符的内容会自动拆成多行。
+ */
 export function AliasField({ aliases, onChange }: { aliases: string[]; onChange: (next: string[]) => void }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const shown = draft ?? aliases.join("、");
+  /**
+   * 收尾（失焦 / 回车 / 删行时）：去首尾空白、去重。
+   * ★ 一整列都是空行时原样保留：parseAliases 会滤掉空值，那样「加了两行空别名、删掉一行」
+   *   会连另一行一起吃掉。只要已经填了内容，空行就该被收干净（空别名不进数据）。
+   */
+  const tidy = (list: string[]) => {
+    const trimmed = list.map((value) => value.trim());
+    return trimmed.some(Boolean) ? parseAliases(trimmed.join("、")) : trimmed;
+  };
+  const commit = (list: string[]) => {
+    const next = tidy(list);
+    if (next.length !== aliases.length || next.some((value, index) => value !== aliases[index])) onChange(next);
+  };
   return (
-    <label className="card-field card-field-inline">
+    <div className="card-field">
       <span className="card-field-label">别名</span>
-      <input
-        className="text-field card-field-input"
-        type="text"
-        value={shown}
-        placeholder="小名、称谓、绰号，用顿号分隔"
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => {
-          if (draft !== null) onChange(parseAliases(draft));
-          setDraft(null);
-        }}
-      />
-    </label>
+      <div className="alias-list">
+        {aliases.map((alias, index) => (
+          <div className="alias-row" key={index}>
+            <input
+              className="text-field card-field-input"
+              type="text"
+              value={alias}
+              placeholder={index === 0 ? "小名、称谓、绰号" : "再填一个"}
+              aria-label={`别名 ${index + 1}`}
+              onChange={(event) => onChange(aliases.map((item, i) => (i === index ? event.target.value : item)))}
+              onBlur={() => commit(aliases)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                commit(aliases);
+              }}
+            />
+            <button
+              className="link-button is-danger alias-remove"
+              type="button"
+              aria-label={`删除别名「${alias || index + 1}」`}
+              title="删除这个别名"
+              onClick={() => commit(aliases.filter((_, i) => i !== index))}
+            >
+              <Icon name="trash" size={13} />
+            </button>
+          </div>
+        ))}
+        <button className="link-button alias-add" type="button" onClick={() => onChange([...aliases, ""])}>
+          <Icon name="plus" size={13} />
+          添加别名
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -120,33 +157,91 @@ export function ListToolbar({
   );
 }
 
-/** 可折叠卡片的外框：标题行 + 右侧徽标 + 展开内容。 */
+/** 卡片拖动排序的回调（可选）：给了才显示抓手、才允许拖。 */
+export interface CardDrag {
+  /**
+   * 排序拖动：**整张卡**都是拖拽源（边框、标题行、展开后的空白处都行），
+   * 只有在输入框 / 文本域里选字不触发拖动。没有额外的拖动按钮。
+   */
+  /** 这张卡正在被拖。 */
+  dragging: boolean;
+  /** 拖着别的卡悬停在这张上（画落点线）。 */
+  over: boolean;
+  onStart: () => void;
+  onEnter: () => void;
+  onDrop: () => void;
+  onEnd: () => void;
+}
+
+/** 可折叠卡片的外框：（抓手）+ 标题行 + 右侧徽标 + 展开内容。 */
 export function CardShell({
   open,
   onToggle,
   title,
   meta,
-  injected,
-  onInject,
+  drag,
   children,
 }: {
   open: boolean;
   onToggle: () => void;
   title: string;
   meta?: ReactNode;
-  injected: boolean;
-  onInject: (next: boolean) => void;
+  drag?: CardDrag;
   children: ReactNode;
 }) {
+  /** 本次按下是否落在输入框里：是则这次手势不拖卡（选字优先）。 */
+  const dragFromEditableRef = useRef(false);
+
   return (
-    <article className={`material-card ${open ? "is-open" : ""} ${injected ? "" : "is-muted"}`}>
+    <article
+      className={`material-card ${open ? "is-open" : ""} ${drag?.dragging ? "is-dragging" : ""} ${drag?.over ? "is-drop-target" : ""}`}
+      draggable={Boolean(drag)}
+      onMouseDown={
+        drag
+          ? (event) => {
+              const target = event.target as HTMLElement;
+              dragFromEditableRef.current = Boolean(target.closest("input, textarea, select, [contenteditable]"));
+            }
+          : undefined
+      }
+      onDragStart={
+        drag
+          ? (event) => {
+              if (dragFromEditableRef.current) {
+                event.preventDefault();
+                return;
+              }
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", title);
+              drag.onStart();
+            }
+          : undefined
+      }
+      onDragEnd={drag ? drag.onEnd : undefined}
+      onDragOver={
+        drag
+          ? (event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              drag.onEnter();
+            }
+          : undefined
+      }
+      onDrop={
+        drag
+          ? (event) => {
+              event.preventDefault();
+              drag.onDrop();
+            }
+          : undefined
+      }
+    >
       <div className="material-card-head">
         <button className="material-card-toggle" type="button" onClick={onToggle} aria-expanded={open}>
           <Icon name="chevron" size={13} />
           <span className="material-card-name">{title || "（未命名）"}</span>
           {meta && <span className="material-card-meta">{meta}</span>}
         </button>
-        <Switch checked={injected} label="允许注入提示词" onChange={onInject} />
       </div>
       {open && <div className="material-card-body">{children}</div>}
     </article>

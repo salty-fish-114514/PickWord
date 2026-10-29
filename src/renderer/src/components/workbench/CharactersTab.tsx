@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { AliasField, CardShell, FieldArea, ListToolbar } from "./shared";
 import { Icon } from "../Icon";
@@ -19,14 +19,19 @@ interface CharactersTabProps {
 const GROUPS: CharacterGroup[] = ["main", "minor"];
 
 /**
- * 「角色」：卡片列表（主要 / 次要分组）+ 搜索 + 新建 + 从正文提取候选名字。
- * 卡片字段：背景 / 性格 / 外观 三个半固定字段，加「+ 字段」自定义。
+ * 「角色」：卡片列表（主要 / 次要分组）+ 搜索 + 新建 + 从正文提取候选名字 + 拖动排序。
+ * 卡片字段：背景 / 性格 / 外观 三个半固定属性，加「添加自定义属性」自由扩展。
+ * 卡片只做本地资料与统计（提及次数、专名写法检查），内容不进提示词。
  */
 export function CharactersTab({ materials, onChange, text, chapterIndex, currentChapter, selectedText }: CharactersTabProps) {
   const [query, setQuery] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
   const [extracted, setExtracted] = useState<ExtractedName[] | null>(null);
   const [scope, setScope] = useState<"chapter" | "all">(chapterIndex.hasMarks ? "chapter" : "all");
+  /** 拖动排序：正在拖的卡与当前悬停的卡。ref 是 drop 的兜底——dragstart 与 drop 之间不一定已经重渲染。 */
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+  const dragIdRef = useRef<string | null>(null);
 
   const cards = materials.characters;
   const scopeText = scope === "chapter" && chapterIndex.hasMarks ? text.slice(currentChapter.bodyStart, currentChapter.end) : text;
@@ -52,6 +57,25 @@ export function CharactersTab({ materials, onChange, text, chapterIndex, current
     onChange({ ...materials, characters: [...cards, card] });
     setOpenId(card.id);
     setQuery("");
+  }
+
+  /**
+   * 把 fromId 这张卡挪到 toId 的位置。只在同一分组内排序（跨组拖动忽略）：
+   * 分组是卡片自己的属性，不该被拖动顺序改掉。顺序就是数组顺序，随旁车一起存。
+   */
+  function moveCard(fromId: string, toId: string) {
+    dragIdRef.current = null;
+    setDragId(null);
+    setOverId(null);
+    if (fromId === toId) return;
+    const fromIndex = cards.findIndex((card) => card.id === fromId);
+    const toIndex = cards.findIndex((card) => card.id === toId);
+    if (fromIndex < 0 || toIndex < 0 || cards[fromIndex].group !== cards[toIndex].group) return;
+    const card = cards[fromIndex];
+    const next = cards.filter((_, index) => index !== fromIndex);
+    const insertAt = next.findIndex((item) => item.id === toId) + (fromIndex < toIndex ? 1 : 0);
+    next.splice(insertAt, 0, card);
+    onChange({ ...materials, characters: next });
   }
 
   function runExtract() {
@@ -112,7 +136,7 @@ export function CharactersTab({ materials, onChange, text, chapterIndex, current
       {cards.length === 0 && !extracted && (
         <div className="chapter-empty">
           <p>还没有角色卡。</p>
-          <span>建卡后，名字一出现在送入模型的正文里，卡片内容就会自动随提示词注入；也可以先用「提取」找出正文里反复出现的名字。</span>
+          <span>卡片是给你自己看的资料：名字与别名会用于本地的提及统计、重复提示和专名写法检查，不会送进提示词。也可以先用「提取」找出正文里反复出现的名字。</span>
         </div>
       )}
 
@@ -132,8 +156,24 @@ export function CharactersTab({ materials, onChange, text, chapterIndex, current
                 onToggle={() => setOpenId(openId === card.id ? null : card.id)}
                 title={card.name}
                 meta={`${mentions.get(card.id) ?? 0} 次`}
-                injected={card.inject}
-                onInject={(next) => update(card.id, { inject: next })}
+                drag={{
+                  dragging: dragId === card.id,
+                  over: overId === card.id && dragId !== card.id,
+                  onStart: () => {
+                    dragIdRef.current = card.id;
+                    setDragId(card.id);
+                  },
+                  onEnter: () => setOverId(card.id),
+                  onDrop: () => {
+                    const from = dragIdRef.current;
+                    if (from) moveCard(from, card.id);
+                  },
+                  onEnd: () => {
+                    dragIdRef.current = null;
+                    setDragId(null);
+                    setOverId(null);
+                  },
+                }}
               >
                 <label className="card-field card-field-inline">
                   <span className="card-field-label">名字</span>
@@ -159,8 +199,8 @@ export function CharactersTab({ materials, onChange, text, chapterIndex, current
                       className="text-field card-field-input card-extra-label"
                       type="text"
                       value={field.label}
-                      placeholder="字段名"
-                      aria-label="自定义字段名"
+                      placeholder="属性名，如「武器」「师承」"
+                      aria-label="自定义属性名"
                       onChange={(event) => update(card.id, { extra: card.extra.map((f, i) => (i === index ? { ...f, label: event.target.value } : f)) })}
                     />
                     <FieldArea
@@ -173,9 +213,14 @@ export function CharactersTab({ materials, onChange, text, chapterIndex, current
                   </div>
                 ))}
                 <div className="card-actions">
-                  <button className="link-button" type="button" onClick={() => update(card.id, { extra: [...card.extra, { label: "", text: "" }] })}>
+                  <button
+                    className="link-button"
+                    type="button"
+                    title="自己加一条属性，比如「武器」「师承」「口头禅」"
+                    onClick={() => update(card.id, { extra: [...card.extra, { label: "", text: "" }] })}
+                  >
                     <Icon name="plus" size={13} />
-                    字段
+                    添加自定义属性
                   </button>
                   <button className="link-button is-danger" type="button" onClick={() => remove(card.id)}>
                     <Icon name="trash" size={13} />

@@ -86,9 +86,13 @@ export interface ModelProfile {
    *   日志 predicted_n=2 —— 只吐了「无」+EOS。原因：模型的自然首 token 是 `<think>`，被文法判非法后
    *   合法集合只剩「无 / A / B」，「无」是唯一一个 token 就能合法结束的输出，于是判断被迫提前到第一个 token
    *   并坍缩。约束解码只在合法 token 里重新归一化，不会补上被排除的自然首 token。
-   *   指令类任务（纠错 / 校验）必须把它接在 assistantOpen 之后，模型才处于训练时的「直接作答」分布；
+   *   指令类任务（纠错）必须把它接在 assistantOpen 之后，模型才处于训练时的「直接作答」分布；
    *   微调时训练样本的回合格式也必须与运行时逐字节一致（含这个空思考块）。
-   *   候选续写（promptBuilder.buildPrompt）是续写式用法，assistant 回合直接接正文，有意不加。
+   *
+   * ★ 2026-10-25 起续写也统一加上它（promptBuilder.assemble）：候选 / 短句展开 / 纠错三条链路
+   *   的 assistant 回合开头完全一致，都是「assistantOpen + 空思考块」，之后才各自接正文或输出格式。
+   *   理由是这就是底模训进去的分布（Qwen 官方 chat_template 在 enable_thinking=false 时的写法），
+   *   也便于将来做 SFT：一套样本格式覆盖全部任务。此前「续写有意不加」的决定已作废。
    */
   noThinkPrefix: string
   /** 终止符文本（含服务器报告的 eos_token），renderer 的 mock / 兜底判断用。 */

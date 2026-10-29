@@ -46,6 +46,12 @@ interface LibraryHomeProps {
   onResetAdvanced: () => void;
   /** 打开「模型与推理」面板（警告条与设置面板都从这里进）；演示模式下不传。 */
   onOpenBackendSettings?: () => void;
+  /** 设置「基本」页「关于与更新」块用；onCheckUpdate 不传则该块不显示（演示模式）。 */
+  appVersion?: string | null;
+  updateBusy?: boolean;
+  onCheckUpdate?: () => void;
+  /** 设置「基本」页的「重看新手引导」。 */
+  onReplayOnboarding?: () => void;
 }
 
 /** 首页的一张卡片：独立短篇，或把同一部长篇的各卷归成一张。 */
@@ -147,6 +153,10 @@ export function LibraryHome({
   onSettingsChange,
   onResetAdvanced,
   onOpenBackendSettings,
+  appVersion = null,
+  updateBusy = false,
+  onCheckUpdate,
+  onReplayOnboarding,
 }: LibraryHomeProps) {
   const [query, setQuery] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -705,6 +715,10 @@ export function LibraryHome({
             onOpenBackendSettings={onOpenBackendSettings}
             detectedContextLen={backendContextLen}
             detectedSlots={backendSlots}
+            appVersion={appVersion}
+            updateBusy={updateBusy}
+            onCheckUpdate={onCheckUpdate}
+            onReplayOnboarding={onReplayOnboarding}
           />
         )}
       </div>

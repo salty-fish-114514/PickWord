@@ -15,7 +15,7 @@ import { validateEngineModelForm, type EngineModelForm } from "./engineModelForm
 import { SetupFrame, StatusNote } from "./setupShared";
 import { defaultDeviceId, errorText } from "./setupUtils";
 import { requireApi } from "../../lib/platform";
-import type { BackendDeviceInfo, DownloadProgress, HardwareReport, SetupCatalog, SetupState } from "../../lib/types";
+import type { BackendDeviceInfo, BackendKind, DownloadProgress, HardwareReport, SetupCatalog, SetupState } from "../../lib/types";
 import { DEFAULT_CONTEXT_LENGTH, getArgNumber } from "../../../../shared/backendArgs";
 
 type WizardStep = 1 | 2 | 3 | 4;
@@ -76,6 +76,10 @@ export default function SetupWizard({ state, error = null, startAt = "hardware",
   const [confirming, setConfirming] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState("");
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  /** 当前装的引擎类型：老配置没有 kind 时为 null（界面只说「当前引擎」）。 */
+  const [engineKind, setEngineKind] = useState<BackendKind | null>(deviceOnly ? state?.existingConfig?.kind ?? null : null);
+  const [switching, setSwitching] = useState(false);
+  const [switchNote, setSwitchNote] = useState<string | null>(null);
 
   /* ── 读取清单；只在用户尚未改动对应字段时填默认值 ── */
   useEffect(() => {
@@ -159,6 +163,7 @@ export default function SetupWizard({ state, error = null, startAt = "hardware",
         contextLength: form.contextLength,
       });
       setDeploying(false);
+      setEngineKind(form.backendKind);
       await queryDevices();
     } catch (caught) {
       setDeployError(errorText(caught, "部署中断"));
@@ -189,16 +194,61 @@ export default function SetupWizard({ state, error = null, startAt = "hardware",
     }
   }
 
-  /** 写入 --device（或移除）→ 主进程重启后端 → 交回 Bootstrap。 */
-  async function finish(deviceId: string | null) {
+  /**
+   * 启动后端并等一小会儿：能立刻看出「起不来」（缺 DLL、端口占用、显卡不存在都会在几秒内报错），
+   * 又不会把用户扣在这里等模型加载完 —— 30 秒还没结果就照常进主界面，那边有进度条。
+   * 返回 null 表示启动成功或仍在加载；返回字符串表示失败原因。
+   */
+  async function waitForBackend(): Promise<string | null> {
+    const api = requireApi();
+    const started = Date.now();
+    let sawActive = false;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    while (Date.now() - started < 30_000) {
+      const status = await api.getBackendDetail();
+      if (status.state === "error") return status.message || "后端启动失败。";
+      if (status.state === "ready") return null;
+      if (status.state !== "stopped") sawActive = true;
+      // 重启瞬间会短暂读到 stop 留下的「stopped」；只有「先醒后又停」或一直没动才算没起来。
+      else if (sawActive || Date.now() - started > 4_000) return status.message || "后端没有启动。";
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return null;
+  }
+
+  /** 启动（或重启）后端 → 验证 → 成功才交回 Bootstrap，失败就留在本步给修复入口。 */
+  async function startAndVerify(action: () => Promise<unknown>) {
     setConfirming(true);
     setDeviceError(null);
+    setSwitchNote(null);
     try {
-      await requireApi().updateBackendDevice(deviceId);
+      await action();
+      const problem = await waitForBackend();
+      if (problem) {
+        setDeviceError(problem);
+        setConfirming(false);
+        return;
+      }
       await onFinished();
     } catch (caught) {
-      setDeviceError(`保存设备配置失败：${errorText(caught, "未知错误")}`);
+      setDeviceError(`启动服务失败：${errorText(caught, "未知错误")}`);
       setConfirming(false);
+    }
+  }
+
+  /** 换引擎：模型不动，只补下载引擎包；换完重新查设备（新引擎的设备名不同）。 */
+  async function switchEngine() {
+    setSwitching(true);
+    setDeviceError(null);
+    setSwitchNote(null);
+    try {
+      const config = await requireApi().switchBackendEngine("vulkan");
+      setEngineKind(config.kind ?? "vulkan");
+      setSwitching(false);
+      await queryDevices();
+    } catch (caught) {
+      setSwitchNote(`换引擎失败：${errorText(caught, "未知错误")}`);
+      setSwitching(false);
     }
   }
 
@@ -210,9 +260,15 @@ export default function SetupWizard({ state, error = null, startAt = "hardware",
       confirming={confirming}
       selected={selectedDevice}
       error={deviceError}
+      engineKind={engineKind}
+      switching={switching}
+      switchNote={switching ? (progress?.filename ?? "正在准备 Vulkan 引擎…") : switchNote}
       onSelect={setSelectedDevice}
-      onConfirm={() => void finish(selectedDevice || null)}
-      onUseDefault={() => void finish(null)}
+      onConfirm={() => void startAndVerify(() => requireApi().updateBackendDevice(selectedDevice || null))}
+      onUseDefault={() => void startAndVerify(() => requireApi().updateBackendDevice(null))}
+      onSwitchEngine={() => void switchEngine()}
+      onRetryStart={() => void startAndVerify(() => requireApi().retryBackend())}
+      onOpenLog={() => void requireApi().openBackendLog()}
     />
   );
 

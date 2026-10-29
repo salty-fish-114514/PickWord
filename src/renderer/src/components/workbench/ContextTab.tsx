@@ -2,7 +2,7 @@ import { Block, Switch } from "./shared";
 import type { WorkbenchTab } from "./tabs";
 import { Icon } from "../Icon";
 import { chapterLabel, type Chapter } from "../../lib/chapters";
-import { MAX_INJECTED_CARDS, type MaterialHit } from "../../lib/materials";
+import type { MaterialHit } from "../../lib/materials";
 import type { ResolvedSegment } from "../../lib/outline";
 import { PROMPT_MODE_LABEL, type PromptMode } from "../../lib/promptBuilder";
 import type { ContextState, Materials } from "../../lib/types";
@@ -19,9 +19,9 @@ interface ContextTabProps {
   notices: string[];
   anchorNotice: string | null;
   bodyLength: number;
+  /** 当前正文窗口里命中（名字 / 别名出现）的卡片：只做展示，不进提示词。 */
   hits: MaterialHit[];
   materials: Materials;
-  onMaterialsChange: (next: Materials) => void;
   currentChapter: Chapter;
   onOpenTab: (tab: WorkbenchTab) => void;
 }
@@ -42,7 +42,6 @@ export function ContextTab({
   bodyLength,
   hits,
   materials,
-  onMaterialsChange,
   currentChapter,
   onOpenTab,
 }: ContextTabProps) {
@@ -57,19 +56,6 @@ export function ContextTab({
         : injecting
           ? `${where} · ${countChars(segment.text)} 字`
           : `${where}：光标还在段起点之前`;
-  const injected = hits.slice(0, MAX_INJECTED_CARDS);
-
-  function setInject(hit: MaterialHit, next: boolean) {
-    if (hit.kind === "character") {
-      onMaterialsChange({
-        ...materials,
-        characters: materials.characters.map((c) => (c.id === hit.id ? { ...c, inject: next } : c)),
-      });
-    } else {
-      onMaterialsChange({ ...materials, lore: materials.lore.map((l) => (l.id === hit.id ? { ...l, inject: next } : l)) });
-    }
-  }
-
   return (
     <>
       <div className="mode-chip" title="由「风格参考」「大纲」两个开关共同决定">
@@ -115,8 +101,8 @@ export function ContextTab({
         <p className="context-hint">只注入光标所在段的大纲；总纲只给自己看。</p>
       </Block>
 
-      <Block title="人物与设定">
-        {injected.length === 0 ? (
+      <Block title="人物与设定 · 只统计，不进提示词">
+        {hits.length === 0 ? (
           <div className="context-summary">
             <span>
               {materials.characters.length + materials.lore.length === 0
@@ -129,19 +115,17 @@ export function ContextTab({
           </div>
         ) : (
           <ul className="hit-list">
-            {injected.map((hit) => (
+            {hits.map((hit) => (
               <li key={`${hit.kind}:${hit.id}`} className="hit-item">
                 <Icon name={hit.kind === "character" ? "person" : "lore"} size={14} />
                 <span className="hit-name">{hit.name}</span>
-                <span className="hit-count">出现 {hit.count} 次</span>
-                <Switch checked label={`停止注入 ${hit.name}`} onChange={(next) => setInject(hit, next)} />
+                <span className="hit-count">本窗口出现 {hit.count} 次</span>
               </li>
             ))}
           </ul>
         )}
         <p className="context-hint">
-          名字（或别名）出现在送入模型的正文里时自动注入，最多 {MAX_INJECTED_CARDS} 张。窗口起点不变时只增不减，避免反复重算缓存。
-          {hits.length > MAX_INJECTED_CARDS ? ` 另有 ${hits.length - MAX_INJECTED_CARDS} 张因上限未注入。` : ""}
+          名字（或别名）出现在当前正文窗口里就列在这儿，纯本地统计：卡片内容不会送进提示词。名字另外用于「提及 N 次」、重复提示的白名单和专名写法检查。
         </p>
       </Block>
 

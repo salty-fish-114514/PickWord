@@ -1067,14 +1067,33 @@
   border-radius: 8px;
   background: var(--field-bg);
   transition: border-color 150ms ease, opacity 150ms ease;
+  /* 整张卡都是拖拽源：边框、标题行、展开后的空白处按住就能拖 */
+  cursor: grab;
+}
+
+.material-card input,
+.material-card textarea,
+.material-card select {
+  cursor: text;
+}
+
+.material-card button {
+  cursor: pointer;
 }
 
 .material-card.is-open {
   border-color: var(--line-strong);
 }
 
-.material-card.is-muted {
-  opacity: 0.62;
+.material-card.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+/* 落点：在悬停那张卡的上边画一条线，表示「拖到这里」 */
+.material-card.is-drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 -2px 0 0 var(--accent);
 }
 
 .material-card-head {
@@ -1159,6 +1178,34 @@
 .card-field-inline .card-field-label {
   flex: 0 0 34px;
   margin: 0;
+}
+
+/* 别名：一行一个纵向铺开，多了也不用横向滚动 */
+.alias-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.alias-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alias-row .card-field-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.alias-remove {
+  flex: 0 0 auto;
+  padding: 5px;
+  line-height: 0;
+}
+
+.alias-add {
+  align-self: flex-start;
 }
 
 .card-field-input {
@@ -1630,7 +1677,7 @@ button.chapter-item:disabled {
 
 .context-menu {
   position: fixed;
-  z-index: 40;
+  z-index: 55;  /* 高于 .modal-backdrop (50)，保证在新手引导等模态框上层 */
   min-width: 196px;
   padding: 6px;
   border: 1px solid var(--line-strong);
@@ -1907,7 +1954,7 @@ button.chapter-item:disabled {
    · 标题行、页码、概率条、底部快捷键说明不显示；DOM 与键盘逻辑保持不变。
    · 内部尺寸全部用 em，随 --ui-scale 一起缩放。
    · 半透明靠背景色 alpha 实现，后方正文可透出；整体 opacity 只留给
-     .is-faded（长按穿透键 / 输入法组字），不要在别处改浮层的 opacity。
+     .is-faded（长按隐藏浮窗键 / 「浮窗常驻」时输入法组字），不要在别处改浮层的 opacity。
    · 宽度随内容收缩，词与概率之间只有一个列间距。 */
 
 .candidate-popover {
@@ -1936,7 +1983,7 @@ button.chapter-item:disabled {
 }
 
 /*
- * 浮层淡化（长按穿透键 / 「浮窗常驻」时输入法组字）：
+ * 浮层淡化（只在「浮窗常驻」+ 输入法组字时）：
  * 不透明度由设置里的「浮窗淡化透明度」决定（写进 --popover-fade-opacity），同时让出鼠标事件。
  */
 .candidate-popover.is-faded {

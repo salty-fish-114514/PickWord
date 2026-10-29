@@ -26,10 +26,8 @@ export interface CharacterCard {
   background: string
   personality: string
   appearance: string
-  /** 作者自行追加的字段（「+」按钮）。 */
+  /** 作者自行追加的属性（「添加自定义属性」按钮）。 */
   extra: CustomField[]
-  /** 是否允许注入提示词；关掉后只作为资料保存。 */
-  inject: boolean
 }
 
 export type LoreCategory = 'place' | 'org' | 'item' | 'other'
@@ -40,7 +38,6 @@ export interface LoreEntry {
   aliases: string[]
   category: LoreCategory
   text: string
-  inject: boolean
 }
 
 export interface Materials {
@@ -90,8 +87,8 @@ function parseCharacter(raw: unknown): CharacterCard | null {
           .filter(isObj)
           .map((f) => ({ label: str(f.label, 100), text: str(f.text) }))
           .slice(0, 30)
-      : [],
-    inject: raw.inject !== false
+      : []
+    // 旧旁车里的 inject 字段（≤ v5）直接忽略：卡片内容已不再进提示词
   }
 }
 
@@ -105,8 +102,7 @@ function parseLore(raw: unknown): LoreEntry | null {
     name: str(raw.name, 200),
     aliases: strList(raw.aliases),
     category: c === 'place' || c === 'org' || c === 'item' ? c : 'other',
-    text: str(raw.text),
-    inject: raw.inject !== false
+    text: str(raw.text)
   }
 }
 

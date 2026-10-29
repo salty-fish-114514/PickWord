@@ -13,10 +13,6 @@ export interface ProofreadTabProps {
   /** 光标所在的问题（编辑器算出来的），列表里高亮。 */
   activeIssueId: string | null;
   status: ProofStatus;
-  /** 人设校验的状态（同一管线，独立计时）。 */
-  consistencyStatus: ProofStatus;
-  /** 建过角色卡才有东西可校验。 */
-  hasCharacters: boolean;
   /** 模型已就绪（演示模式恒为 true）。 */
   ready: boolean;
   /** 模型就绪且槽位够用。 */
@@ -25,12 +21,9 @@ export interface ProofreadTabProps {
   isDemo: boolean;
   auto: boolean;
   local: boolean;
-  consistencyAuto: boolean;
   onAutoChange: (next: boolean) => void;
   onLocalChange: (next: boolean) => void;
-  onConsistencyAutoChange: (next: boolean) => void;
   onCheckNow: () => void;
-  onCheckConsistency: () => void;
   onCancel: () => void;
   onAccept: (issue: Issue) => void;
   onDismiss: (issue: Issue) => void;
@@ -65,20 +58,15 @@ export function ProofreadTab({
   issues,
   activeIssueId,
   status,
-  consistencyStatus,
-  hasCharacters,
   ready,
   available,
   slots,
   isDemo,
   auto,
   local,
-  consistencyAuto,
   onAutoChange,
   onLocalChange,
-  onConsistencyAutoChange,
   onCheckNow,
-  onCheckConsistency,
   onCancel,
   onAccept,
   onDismiss,
@@ -86,7 +74,6 @@ export function ProofreadTab({
   onClearAll,
 }: ProofreadTabProps) {
   const running = status.state === "running";
-  const checkingConsistency = consistencyStatus.state === "running";
   const llmIssues = issues.filter((issue) => issue.source === "llm");
   const localIssues = issues.filter((issue) => issue.source === "local");
   const needSlots = ready && !isDemo && slots < 2;
@@ -128,40 +115,6 @@ export function ProofreadTab({
       </Block>
 
       <Block
-        title="人设校验"
-        action={
-          checkingConsistency ? (
-            <button className="quiet-button anchor-button" type="button" onClick={onCancel}>
-              停止
-            </button>
-          ) : (
-            <button
-              className="quiet-button anchor-button"
-              type="button"
-              disabled={!available || !hasCharacters || running}
-              title={hasCharacters ? "把这段正文和出现过的角色卡对一遍" : "先在「角色」页建卡"}
-              onClick={onCheckConsistency}
-            >
-              <Icon name="person" />
-              校验当前窗口
-            </button>
-          )
-        }
-      >
-        <p className={`context-hint ${consistencyStatus.state === "error" ? "is-error" : ""}`}>
-          {!hasCharacters
-            ? "先在「角色」页建卡：模型会把正文和出现过的角色卡（背景 / 性格 / 外观 / 自定义项）对一遍，只报明确矛盾。"
-            : statusText(consistencyStatus, "校验", "矛盾")}
-        </p>
-      </Block>
-
-      <Block title="随纠错一起校验人设" action={<Switch checked={consistencyAuto} label="随纠错一起校验人设" onChange={onConsistencyAutoChange} />}>
-        <p className="context-hint">
-          每次纠错跑完，同一窗口再对一遍角色卡（{slots >= 3 || isDemo ? "有第 3 个槽位，和纠错并行" : "只有 2 个槽位，排在纠错后面"}）。
-        </p>
-      </Block>
-
-      <Block
         title={issues.length === 0 ? "问题" : `问题 · 模型 ${llmIssues.length} · 本地 ${localIssues.length}`}
         action={
           issues.length > 0 ? (
@@ -173,7 +126,7 @@ export function ProofreadTab({
         last
       >
         {issues.length === 0 ? (
-          <p className="context-hint">波浪线 = 语病 / 人设矛盾，底色 = 单调 / 重复。光标落在标记上时，底栏会显示说明。</p>
+          <p className="context-hint">波浪线 = 语病，底色 = 单调 / 重复。光标落在标记上时，底栏会显示说明。</p>
         ) : (
           <ul className="issue-list">
             {issues.map((issue) => (

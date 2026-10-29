@@ -82,7 +82,7 @@ import {
   type ResolvedSegment,
 } from "./lib/outline";
 import { registerFlusher } from "./lib/flushRegistry";
-import { buildMaterialsText, findMaterialHits, mergeStickyHits, type MaterialHit } from "./lib/materials";
+import { findMaterialHits } from "./lib/materials";
 import { platform } from "./lib/platform";
 import { useBackendStatus } from "./lib/useBackendStatus";
 import { useEditHistory } from "./lib/useEditHistory";
@@ -95,12 +95,7 @@ import {
   slidingWindowMaxBodyLen,
   type BuildPromptArgs,
 } from "./lib/promptBuilder";
-import {
-  matchesSampleKey,
-  PEEK_KEY_SHORT,
-  SAMPLE_KEY_SHORT,
-  type SettingsValues,
-} from "./lib/settings";
+import { HOLD_KEY_SHORT, holdKeyChar, matchesHoldKey, matchesHoldKeyByCode, type HoldKey, type SettingsValues } from "./lib/settings";
 import type {
   BookRef,
   Candidate,
@@ -144,6 +139,7 @@ function effectiveContextLen(profile: ModelProfile | null, settings: SettingsVal
  *
  * 大纲只来自光标所在的大纲段（lib/outline.ts）：有文字且开着 → 注入它，正文从段起点一刀切送到光标
  * （旧锚点语义）；段起点到光标超过硬上限时锚点置空、退回滑窗，大纲照常注入。总纲永不注入。
+ * 人物与设定不进提示词（2026-10-25 起）：卡片只做本地统计。
  */
 function promptArgsFor(
   text: string,
@@ -152,7 +148,6 @@ function promptArgsFor(
   settings: SettingsValues,
   windowStart: number,
   profile: ModelProfile | null,
-  materialsText: string | undefined,
 ): BuildPromptArgs {
   const chapterIndex = parseChapters(text);
   const segment = segmentAt(layoutOutline(text, chapterIndex, ctx.outlineSegments), chapterIndex, caret);
@@ -161,17 +156,18 @@ function promptArgsFor(
   const styleText = ctx.styleEnabled ? ctx.styleText : undefined;
   const modelContextLen = effectiveContextLen(profile, settings);
   const template = profile?.template;
+  // 与纠错共用同一个空思考块：assistant 回合开头逐字节一致，SFT 样本可以一套格式覆盖两条链路
+  const noThinkPrefix = profile?.noThinkPrefix ?? "";
 
   let anchorOffset: number | null = null;
   if (injecting) {
-    const limit = bodyHardLimit(modelContextLen, styleText, outlineText, template, materialsText);
+    const limit = bodyHardLimit(modelContextLen, styleText, outlineText, template, noThinkPrefix);
     if (caret - segment.start < limit) anchorOffset = segment.start;
   }
 
   return {
     styleText,
     outlineText,
-    materialsText,
     docText: text,
     cursorOffset: caret,
     anchorOffset,
@@ -180,12 +176,16 @@ function promptArgsFor(
     anchorWarnLen: settings.anchorWarnLen,
     modelContextLen,
     template,
+    noThinkPrefix,
   };
 }
 
 /* ════════════════════════════════════════════════════════════════
    编辑器组件
    ════════════════════════════════════════════════════════════════ */
+
+/** 新手引导试做页要打勾的四件事；正常运行不传 onTaskEvent。 */
+export type WritingTaskEvent = "candidate-accepted" | "hold-hide" | "hold-expand" | "outline-segment";
 
 export interface WritingEditorProps {
   initial: DocumentPayload;
@@ -203,6 +203,8 @@ export interface WritingEditorProps {
   onSettingChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onSave: (document: DocumentPayload) => Promise<LibraryEntry>;
   onBack: () => void;
+  /** 新手引导试做页用：真实完成一次对应操作时报一个事件，不影响任何既有逻辑。 */
+  onTaskEvent?: (event: WritingTaskEvent) => void;
 }
 
 /** 编辑器仍保留原有的输入法、候选、查找与大纲逻辑；文稿读写由文库按 id 提供。 */
@@ -218,6 +220,7 @@ export function WritingEditor({
   onSettingChange,
   onSave,
   onBack,
+  onTaskEvent,
 }: WritingEditorProps) {
   const initialCaret = initial.content.length;
   const autoSaveEnabled = settings.autoSaveEnabled;
@@ -263,8 +266,6 @@ export function WritingEditor({
 
   /* ── 角色卡 / 设定（长篇各卷共用，随文稿一起保存） ── */
   const [materials, setMaterials] = useState<Materials>(initial.materials ?? EMPTY_MATERIALS);
-  /** 当前注入提示词的卡片命中（黏性集合，见 lib/materials.ts）。 */
-  const [hits, setHits] = useState<MaterialHit[]>([]);
 
   /* ── 面板开合。右侧面板默认折叠：第一次打开软件只看到干净的编辑区。 ── */
   const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab | null>(null);
@@ -286,8 +287,6 @@ export function WritingEditor({
     slots: backend.profile?.slots ?? 1,
     auto: settings.proofreadAuto,
     local: settings.proofreadLocal,
-    consistencyAuto: settings.consistencyAuto,
-    materials,
     ignoreNames,
   });
 
@@ -299,8 +298,8 @@ export function WritingEditor({
   const lastActivityRef = useRef(performance.now());
   /** 当前页候选 → 展开项（镜像成 ref，计时器到点时取最新的一页）。 */
   const pageItemsRef = useRef<ExpandItem[]>([]);
-  /** 取样键长按计时器：短按 = 随机取词（keyup 时执行），长按 = 展开。 */
-  const sampleHoldTimerRef = useRef<number | null>(null);
+  /** 展开键长按计时器：到点就把当前页候选逐行展开；短按在 keyup 里补回这个键本身。 */
+  const expandHoldTimerRef = useRef<number | null>(null);
   /** 当前显示的候选对应的提示词（展开要接在它后面；lastPromptRef 可能已被更新的在飞请求改写）。 */
   const candidatePromptRef = useRef("");
   const [chaptersOpen, setChaptersOpen] = useState(false);
@@ -321,7 +320,8 @@ export function WritingEditor({
   const [candidateError, setCandidateError] = useState<string | null>(null);
   /** 空候选提示：模型这次没给出可插入的词，不是故障。 */
   const [candidateNotice, setCandidateNotice] = useState<string | null>(null);
-  const [peekActive, setPeekActive] = useState(false);
+  /** 长按「隐藏浮窗键」期间浮窗走「浮窗淡化」（.is-faded + 让出鼠标），不是不渲染。 */
+  const [holdFaded, setHoldFaded] = useState(false);
   const [prefillChars, setPrefillChars] = useState(0);
 
   /* ── 保存 ─────────────────────────────────────── */
@@ -349,8 +349,6 @@ export function WritingEditor({
   const selectionRef = useRef<SelectionRange>({ start: initialCaret, end: initialCaret });
   const contextRef = useRef(context);
   const materialsRef = useRef(materials);
-  /** 黏性命中集合：窗口起点不变时只增不减。 */
-  const stickyHitsRef = useRef<{ bodyStart: number; hits: MaterialHit[] } | null>(null);
   const settingsRef = useRef(settings);
   const backendStatusRef = useRef(backendStatus);
   const profileRef = useRef(backend.profile);
@@ -361,9 +359,11 @@ export function WritingEditor({
   const [scheduler] = useState(() => new CandidateScheduler(candidateSource.supportsCancel));
   const lastPromptRef = useRef("");
 
-  // 穿透键
-  const peekTimerRef = useRef<number | null>(null);
-  const peekActiveRef = useRef(false);
+  // 长按隐藏浮窗
+  const hideTimerRef = useRef<number | null>(null);
+  const hideActiveRef = useRef(false);
+  /** 本次淡化是否暂停了候选工作；松开后由 effect 补一次请求恢复。 */
+  const holdPausedRef = useRef(false);
 
   // 滑动窗口
   const windowStartRef = useRef(0);
@@ -413,6 +413,13 @@ export function WritingEditor({
     editor.focus();
   }, [initialCaret]);
 
+  // 首屏兜底：若 onFocus 未触发（如演示/引导内嵌编辑器），挂载后主动请求一次候选。
+  useEffect(() => {
+    if (contentRef.current && !candidateOpen && !candidateLoading) {
+      scheduleCandidates(contentRef.current, selectionRef.current);
+    }
+  }, []);
+
   /** 显示一条会自动消失的提示：apply 立即执行，ms 后执行 clear；同名提示会重置计时。 */
   function flash(key: string, apply: () => void, clear: () => void, ms = NOTICE_MS) {
     const timers = flashTimersRef.current;
@@ -432,65 +439,30 @@ export function WritingEditor({
      A. 提示词
      ════════════════════════════════════════════════════════════════ */
 
-  /** 当前黏性命中集合对应的「人物与设定」文本（没有命中返回 undefined）。 */
-  function currentMaterialsText(): string | undefined {
-    const sticky = stickyHitsRef.current;
-    if (!sticky || sticky.hits.length === 0) return undefined;
-    return buildMaterialsText(materialsRef.current, sticky.hits) || undefined;
-  }
-
   /** 用 ref 里的最新状态拼 PromptBuilder 入参，可以安全地在异步回调里调用。 */
   function currentArgs(text: string, caret: number): BuildPromptArgs {
-    return promptArgsFor(
-      text,
-      caret,
-      contextRef.current,
-      settingsRef.current,
-      windowStartRef.current,
-      profileRef.current,
-      currentMaterialsText(),
-    );
+    return promptArgsFor(text, caret, contextRef.current, settingsRef.current, windowStartRef.current, profileRef.current);
   }
 
-  /**
-   * 拼 prompt 并刷新素材命中：先按旧命中集合算出正文窗口，在窗口里找新出场的名字，
-   * 命中集合变了就用新集合再拼一次。窗口起点不变时集合只增不减（黏性），减少缓存重算。
-   */
+  /** 拼一次 prompt。人物与设定已不参与拼接，所以不用再「先算命中、变了再重拼一次」。 */
   function buildCurrentPrompt(text: string, caret: number) {
-    let args = currentArgs(text, caret);
-    let built = buildPrompt(args);
-    const fresh = findMaterialHits(materialsRef.current, text, built.bodyStart, built.bodyEnd);
-    const merged = mergeStickyHits(stickyHitsRef.current, built.bodyStart, fresh);
-    stickyHitsRef.current = { bodyStart: built.bodyStart, hits: merged };
-    const nextText = buildMaterialsText(materialsRef.current, merged) || undefined;
-    if (nextText !== args.materialsText) {
-      args = { ...args, materialsText: nextText };
-      built = buildPrompt(args);
-    }
-    return built;
+    return buildPrompt(currentArgs(text, caret));
   }
 
   /**
    * 渲染用的 prompt 预览（纯函数推导，不发请求）。
-   * 用途：面板显示当前模式与正文长度、状态栏模式标签、锚点装饰位置。
-   * 素材命中用上一次的黏性集合；下面的 effect 会在它过期时刷新 hits 状态。
+   * 用途：面板显示当前模式与正文字数、状态栏模式标签、锚点装饰位置。
    */
-  const previewMaterialsText = useMemo(() => buildMaterialsText(materials, hits) || undefined, [materials, hits]);
   const promptPreview = useMemo(
-    () => buildPrompt(promptArgsFor(content, selection.start, context, settings, windowStart, backend.profile, previewMaterialsText)),
-    [content, selection.start, context, settings, windowStart, backend.profile, previewMaterialsText],
+    () => buildPrompt(promptArgsFor(content, selection.start, context, settings, windowStart, backend.profile)),
+    [content, selection.start, context, settings, windowStart, backend.profile],
   );
 
-  // 素材命中集合：正文窗口变化后刷新（effect 里更新 ref 与 state，不在渲染期改 ref）。
-  useEffect(() => {
-    const fresh = findMaterialHits(materials, content, promptPreview.bodyStart, promptPreview.bodyEnd);
-    const merged = mergeStickyHits(stickyHitsRef.current, promptPreview.bodyStart, fresh);
-    stickyHitsRef.current = { bodyStart: promptPreview.bodyStart, hits: merged };
-    setHits((previous) => {
-      if (previous.length === merged.length && previous.every((h, i) => h.id === merged[i].id && h.count === merged[i].count)) return previous;
-      return merged;
-    });
-  }, [materials, content, promptPreview.bodyStart, promptPreview.bodyEnd]);
+  // 本窗口命中的卡片名字：纯派生值（只做面板展示与本地统计，不进提示词，也就不需要黏性缓存来保护 KV）。
+  const hits = useMemo(
+    () => findMaterialHits(materials, content, promptPreview.bodyStart, promptPreview.bodyEnd),
+    [materials, content, promptPreview.bodyStart, promptPreview.bodyEnd],
+  );
 
   /* ── 章节 ── */
   const chapterIndex = useMemo(() => parseChapters(content), [content]);
@@ -535,6 +507,10 @@ export function WritingEditor({
   function cancelCandidateWork() {
     scheduler.cancel();
     clearExpandTimer();
+    if (expandHoldTimerRef.current !== null) {
+      window.clearTimeout(expandHoldTimerRef.current);
+      expandHoldTimerRef.current = null;
+    }
     expander.clear();
   }
 
@@ -565,14 +541,14 @@ export function WritingEditor({
   function armIdleExpansion() {
     clearExpandTimer();
     const s = settingsRef.current;
-    if (!s.expandEnabled || !s.expandAuto) return;
+    if (!s.expandEnabled || !s.expandAuto || hideActiveRef.current) return;
     const text = contentRef.current;
     const caret = selectionRef.current.start;
     const elapsed = performance.now() - lastActivityRef.current;
     const delay = Math.max(60, s.expandIdleMs - elapsed);
     expandTimerRef.current = window.setTimeout(() => {
       expandTimerRef.current = null;
-      if (compositionRef.current) return;
+      if (compositionRef.current || hideActiveRef.current) return;
       if (contentRef.current !== text || selectionRef.current.start !== caret) return;
       if (performance.now() - lastActivityRef.current < s.expandIdleMs - 60) return;
       startExpansion(pageItemsRef.current);
@@ -698,6 +674,8 @@ export function WritingEditor({
    *   快速模式：浮层常驻、零延迟；旧候选保留并半透明，直到新结果替换它，避免闪烁。
    */
   function scheduleCandidates(text: string, range: SelectionRange, quickOverride?: boolean) {
+    // 长按隐藏键期间：不刷新浮窗、不发新请求（输入照进正文，浮窗保持淡化的旧列表）。
+    if (hideActiveRef.current) return;
     setCandidateError(null);
     // 文本 / 光标变了，旧的短句与候选不再对应
     clearExpandTimer();
@@ -999,6 +977,7 @@ export function WritingEditor({
 
   /** 在当前光标处插入一个候选词（整体作为一次可撤销操作）。 */
   function insertCandidateText(text: string) {
+    onTaskEvent?.("candidate-accepted");
     const range = selectionRef.current;
     const current = contentRef.current;
     const nextText = current.slice(0, range.start) + text + current.slice(range.end);
@@ -1007,91 +986,178 @@ export function WritingEditor({
     applyProgrammaticEdit(nextText, { start: caret, end: caret }, "candidate");
   }
 
-  /** 接受一行：已展开（哪怕只流出一半）就插整句，否则插词。 */
-  function pickCandidate(indexInPage: number) {
-    const candidate = visibleCandidates[indexInPage];
+  /** 接受全局序号那一行：已展开（哪怕只流出一半）就插整句，否则插词。 */
+  function pickCandidateGlobal(index: number) {
+    const candidate = candidateList[index];
     if (!candidate) return;
-    const row = expander.rows[page * pageSize + indexInPage];
+    const row = expander.rows[index];
     insertCandidateText(candidate.text + (row?.text ?? ""));
   }
 
-  /** 随机取词：按软化概率从全部候选里采样一个（轻量「自回归」体验）。 */
+  /** 接受当前页内的一行（数字键用）。 */
+  function pickCandidate(indexInPage: number) {
+    pickCandidateGlobal(page * pageSize + indexInPage);
+  }
+
+  /** 随机取词：按（软化后的）概率从全部候选里抽一个插入。设置里绑了 sampleKey 才有这条路径。 */
   function sampleCandidate() {
     const picked = sampleByProbability(candidateList);
     if (!picked) return;
-    insertCandidateText(picked.text);
+    const index = candidateList.indexOf(picked);
+    if (index >= 0) pickCandidateGlobal(index);
   }
 
-  /** 松开穿透键 / 窗口失焦：清掉长按计时器并恢复浮层。只碰 ref 和 setter，所以可以 useCallback([])。 */
-  const releasePeek = useCallback(() => {
-    if (peekTimerRef.current !== null) {
-      window.clearTimeout(peekTimerRef.current);
-      peekTimerRef.current = null;
+  /** 长按键短按时补回它本身（空格 / 制表符 / \）：keydown 已经被拦掉，不能少这一个字符。 */
+  function insertHoldKeyChar(key: HoldKey) {
+    const char = holdKeyChar(key);
+    if (!char) return;
+    if (char === "\t") insertTabCharacter();
+    else insertTextAtSelection(char);
+  }
+
+  /** 松开隐藏键 / 窗口失焦：清掉长按计时器并恢复浮层。只碰 ref 和 setter，所以可以 useCallback([])。 */
+  const releaseHold = useCallback(() => {
+    if (hideTimerRef.current !== null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
     }
-    if (peekActiveRef.current) {
-      peekActiveRef.current = false;
-      setPeekActive(false);
+    if (hideActiveRef.current) {
+      hideActiveRef.current = false;
+      setHoldFaded(false);
     }
   }, []);
 
+  // 松开隐藏键后补一次候选请求：淡化期间输入 / 移动光标都被闸住没排程，这里一次性追上。
+  useEffect(() => {
+    if (holdFaded || !holdPausedRef.current) return;
+    holdPausedRef.current = false;
+    scheduleCandidates(contentRef.current, selectionRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdFaded]);
+
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
-  /** 启动穿透键的长按计时（只启动一次，按键自动重复时不重复启动）。 */
-  function startPeekTimer(repeat: boolean) {
-    if (repeat || peekTimerRef.current !== null || peekActiveRef.current) return;
-    peekTimerRef.current = window.setTimeout(() => {
-      peekTimerRef.current = null;
-      peekActiveRef.current = true;
-      setPeekActive(true);
-    }, settingsRef.current.peekHoldMs);
+  /** 启动「长按隐藏浮窗」的计时（只启动一次，按键自动重复时不重复启动）。 */
+  function startHideTimer(repeat: boolean) {
+    if (repeat || hideTimerRef.current !== null || hideActiveRef.current) return;
+    hideTimerRef.current = window.setTimeout(() => {
+      hideTimerRef.current = null;
+      hideActiveRef.current = true;
+      setHoldFaded(true);
+      onTaskEvent?.("hold-hide");
+      // 淡化期间不让后端继续干活：撤掉在飞的候选请求与展开流、停掉自动展开计时，
+      // 浮窗保留上一批列表淡化显示；松开后 effect 会补一次请求恢复。
+      holdPausedRef.current = true;
+      cancelCandidateWork();
+      // 在飞的请求被撤掉后不会自己复位加载态：淡化期间不显示「生成中」，松开后补请求时再置回。
+      setCandidateLoading(false);
+    }, settingsRef.current.holdMs);
   }
 
   /**
    * 编辑器键盘总处理。顺序很重要：
-   *   IME 守卫 → 穿透键 / Tab → 撤销重做 → （浮层打开时）穿透判断 → 浮层快捷键。
+   *   IME 守卫 → 隐藏中放行 → 长按「隐藏浮窗键」→ 撤销重做 → （浮层打开时）浮层快捷键。
    * Ctrl+S / F / H 在 H 节的 window 监听里处理；Ctrl+O 只在首页导入文件。
+   *
+   * 键位（2026-10-25 起）：插入候选只认数字键；Enter 完全还给作者（换行就是换行）；
+   * 长按「隐藏浮窗键」（默认空格）期间浮窗走「浮窗淡化」、按键全部放行，松开就恢复，短按照常输入这个键本身；
+   * 「随机取词键」默认不绑定，绑了之后浮窗打开时按它按概率抽一个候选（绑到长按键上 = 短按取词）；
+   * 长按「展开键」（默认 Tab）把当前页候选逐行展开成短句。两个键都能在设置里改绑。
    */
   function handleEditorKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    const native = event.nativeEvent;
-
-    // ① IME 守卫：组字期间一律不拦截。
-    if (compositionRef.current || native.isComposing || native.keyCode === 229) return;
-
     const s = settingsRef.current;
     const noModifier = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+    const ready = candidateList.length > 0 && !candidateLoading;
 
-    // 「手速快」处理：浮层打开时，短按 Tab 的制表符要等 keyup 才补插入（为了和长按区分）。
-    // 如果作者在 Tab 还没松开时就敲了下一个键，先把制表符补上、取消长按计时，再让这个键按顺序输入，
-    // 否则两个字符的顺序会颠倒。
-    if (
-      s.peekKey === "Tab" &&
-      peekTimerRef.current !== null &&
-      !["Tab", "Shift", "Control", "Alt", "Meta"].includes(event.key)
-    ) {
-      window.clearTimeout(peekTimerRef.current);
-      peekTimerRef.current = null;
-      insertTabCharacter();
+    // ★★★ 最先拦截物理长按键：在任何 IME 状态、任何 native 读取之前先 preventDefault()。
+    //    只吞重复、不阻塞组字；短按字符在 keyup 补回，长按到点再启动计时器。
+    const isHideKey   = noModifier && matchesHoldKeyByCode(event, s.hideKey);
+    const isExpandKey = noModifier && matchesHoldKeyByCode(event, s.expandKey);
+
+    if (isHideKey || isExpandKey) {
+      event.preventDefault();  // 核心：吞掉浏览器原生重复，停住 "·" 狂产出
     }
-
-    // ② 穿透键
-    if (event.key === s.peekKey) {
-      if (s.peekKey === "Tab") {
-        // Shift+Tab 等组合保持浏览器默认行为（把焦点移走）。
-        if (!noModifier) return;
-        // 无论如何不让焦点跑出编辑器：Tab 在写作软件里就是「输入一个制表符」。
-        event.preventDefault();
-        if (!candidateOpen) {
-          // 没有浮层：就是普通文本编辑器的 Tab，立刻插入制表符。
-          insertTabCharacter();
-          return;
-        }
-        // 有浮层：长按 = 穿透；短按 = 普通的 Tab，在 keyup 里补插入制表符。
-        startPeekTimer(event.repeat);
+    if (isHideKey) {
+      if (!candidateOpen) {
+        insertHoldKeyChar(s.hideKey);
         return;
       }
-      // 修饰键作穿透键：Alt 在 Windows 上会激活菜单栏，必须拦掉默认行为。
-      if (s.peekKey === "Alt") event.preventDefault();
-      startPeekTimer(event.repeat);
+      if (!event.repeat && hideTimerRef.current === null && !hideActiveRef.current) {
+        startHideTimer(false);
+      }
+      return;
+    }
+    if (isExpandKey) {
+      if (ready && s.expandEnabled && !event.repeat && expandHoldTimerRef.current === null) {
+        const items = currentPageItems();
+        expandHoldTimerRef.current = window.setTimeout(() => {
+          expandHoldTimerRef.current = null;
+          onTaskEvent?.("hold-expand");
+          startExpansion(items);
+        }, s.holdMs);
+      }
+      return;
+    }
+
+    const native = event.nativeEvent;
+
+    if (isHideKey) {
+      event.preventDefault();  // 吞掉重复，停住 "·" 狂产出
+      if (!candidateOpen) {
+        insertHoldKeyChar(s.hideKey);
+        return;
+      }
+      if (!event.repeat && hideTimerRef.current === null && !hideActiveRef.current) {
+        startHideTimer(false);
+      }
+      return;
+    }
+    if (isExpandKey) {
+      event.preventDefault();  // 吞掉重复，停住 "·" 狂产出
+      if (ready && s.expandEnabled && !event.repeat && expandHoldTimerRef.current === null) {
+        const items = currentPageItems();
+        expandHoldTimerRef.current = window.setTimeout(() => {
+          expandHoldTimerRef.current = null;
+          onTaskEvent?.("hold-expand");
+          startExpansion(items);
+        }, s.holdMs);
+      }
+      return;
+    }
+
+    // ① IME 守卫：组字期间一律不拦截（长按键已在上面处理完毕）。
+    //    兜底：极端情况下 keydown 没拦住，这里再防一次物理长按键的重复。
+    if (compositionRef.current || native.isComposing || native.keyCode === 229) {
+      if (noModifier && (matchesHoldKeyByCode(event, s.hideKey) || matchesHoldKeyByCode(event, s.expandKey))) {
+        event.preventDefault();
+      }
+      return;
+    }
+
+    // ② 淡化中：浮窗淡到「浮窗淡化透明度」并让出鼠标，也不吃任何按键；
+    //    只把这个键自己的自动重复吞掉（长按空格不该打出一串空格）。
+    if (hideActiveRef.current) {
+      // hideKey 已在上面拦截，这里只保留兜底防重复
+      return;
+    }
+
+    // 「手速快」处理：隐藏键还没松开就敲了别的键 → 先把这个键本身补进正文、取消长按计时，
+    // 再让这个键按顺序输入，否则两个字符的顺序会颠倒。（纯修饰键不算，按住 Shift 不该吐出空格。）
+    if (
+      hideTimerRef.current !== null &&
+      !matchesHoldKeyByCode(event, s.hideKey) &&
+      !["Shift", "Control", "Alt", "Meta"].includes(event.key)
+    ) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+      insertHoldKeyChar(s.hideKey);
+    }
+
+    // Tab 永远不许把焦点带出编辑器：没绑成隐藏键时，它就是「输入一个制表符」。
+    if (event.key === "Tab" && noModifier) {
+      event.preventDefault();
+      insertTabCharacter();
+      return;
     }
 
     const commandKey = event.ctrlKey || event.metaKey;
@@ -1110,15 +1176,6 @@ export function WritingEditor({
     }
 
     if (!candidateOpen) return;
-
-    // ③ 穿透中：浮层完全不吃按键，数字、回车、空格、符号原样进入正文。
-    if (peekActiveRef.current) return;
-    // 穿透键是修饰键时，按住它的组合键（如 Shift+1 打「！」）也放行。
-    const modifierHeld =
-      (s.peekKey === "Shift" && event.shiftKey) ||
-      (s.peekKey === "Alt" && event.altKey) ||
-      (s.peekKey === "Control" && event.ctrlKey);
-    if (modifierHeld) return;
 
     // ④ 浮层快捷键
     if (event.key === "Escape") {
@@ -1163,25 +1220,19 @@ export function WritingEditor({
       noteBrowsing(next);
       return;
     }
-    const ready = candidateList.length > 0 && !candidateLoading;
-    if (ready && event.key === "Enter") {
+    // 插入候选只认数字键（Enter 已还给作者：换行就是换行）。
+    // 随机取词键（默认不绑定）：单独绑一个键时，浮窗打开按下就按概率抽一个候选。
+    // 绑在隐藏/展开键上时不在这里处理——那两个分支已接管 keydown，短按在 keyup 里改成取词。
+    if (
+      ready &&
+      s.sampleKey !== "Off" &&
+      noModifier &&
+      !matchesHoldKey(event.key, s.hideKey) &&
+      !matchesHoldKey(event.key, s.expandKey) &&
+      matchesHoldKey(event.key, s.sampleKey)
+    ) {
       event.preventDefault();
-      pickCandidate(localIndex);
-      return;
-    }
-    if (ready && matchesSampleKey(event.key, s.sampleKey)) {
-      event.preventDefault();
-      if (!s.expandEnabled) {
-        sampleCandidate();
-        return;
-      }
-      // 开了短句展开：短按在 keyup 里随机取词，按住 peekHoldMs 则展开当前页
-      if (event.repeat || sampleHoldTimerRef.current !== null) return;
-      const items = currentPageItems();
-      sampleHoldTimerRef.current = window.setTimeout(() => {
-        sampleHoldTimerRef.current = null;
-        startExpansion(items);
-      }, s.peekHoldMs);
+      if (!event.repeat) sampleCandidate();
       return;
     }
     if (ready && !event.altKey && !event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
@@ -1193,23 +1244,28 @@ export function WritingEditor({
     }
   }
 
-  /** keyup：穿透键松开。Tab 短按（长按计时器还没到）= 补插入一个制表符。 */
+  /** keyup：长按键松开。计时器还没到点 = 短按 → 把这个键本身补进正文；已到点 = 长按，什么都不补。 */
   function handleEditorKeyUp(event: KeyboardEvent<HTMLTextAreaElement>) {
     const s = settingsRef.current;
-    if (matchesSampleKey(event.key, s.sampleKey)) {
-      if (sampleHoldTimerRef.current !== null) {
-        window.clearTimeout(sampleHoldTimerRef.current);
-        sampleHoldTimerRef.current = null;
-        if (candidateOpen && candidateList.length > 0 && !candidateLoading) sampleCandidate();
+    const sampleReady = candidateOpen && !candidateLoading && candidateList.length > 0;
+    if (matchesHoldKeyByCode(event, s.hideKey)) {
+      const shortPress = hideTimerRef.current !== null;
+      releaseHold();
+      if (shortPress && !compositionRef.current) {
+        event.preventDefault();
+        // 这个键同时绑了随机取词：短按取词，长按仍是隐藏浮窗。
+        if (s.sampleKey === s.hideKey && sampleReady) sampleCandidate();
+        else insertHoldKeyChar(s.hideKey);
       }
       return;
     }
-    if (event.key !== s.peekKey) return;
-    const shortPress = peekTimerRef.current !== null;
-    releasePeek();
-    if (shortPress && s.peekKey === "Tab" && !compositionRef.current) {
+    if (!matchesHoldKeyByCode(event, s.expandKey) || expandHoldTimerRef.current === null) return;
+    window.clearTimeout(expandHoldTimerRef.current);
+    expandHoldTimerRef.current = null;
+    if (!compositionRef.current) {
       event.preventDefault();
-      insertTabCharacter();
+      if (s.sampleKey === s.expandKey && sampleReady) sampleCandidate();
+      else insertHoldKeyChar(s.expandKey);
     }
   }
 
@@ -1238,7 +1294,7 @@ export function WritingEditor({
   }
 
   /* ════════════════════════════════════════════════════════════════
-     H. 副作用：查找/保存快捷键、穿透键复位、浮层定位、自动保存、后端、关窗落盘
+     H. 副作用：查找/保存快捷键、长按键复位、浮层定位、自动保存、后端、关窗落盘
      ════════════════════════════════════════════════════════════════ */
 
   /**
@@ -1285,18 +1341,18 @@ export function WritingEditor({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // 穿透键松开 / 窗口失焦都要复位，否则浮层会一直淡化（监听挂在 window 上，覆盖焦点丢失的情况）。
+  // 长按键松开 / 窗口失焦都要复位，否则浮层会一直藏着（监听挂在 window 上，覆盖焦点丢失的情况）。
   useEffect(() => {
     const onKeyUp = (event: globalThis.KeyboardEvent) => {
-      if (event.key === settingsRef.current.peekKey) releasePeek();
+      if (matchesHoldKey(event.key, settingsRef.current.hideKey)) releaseHold();
     };
     window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", releasePeek);
+    window.addEventListener("blur", releaseHold);
     return () => {
       window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", releasePeek);
+      window.removeEventListener("blur", releaseHold);
     };
-  }, [releasePeek]);
+  }, [releaseHold]);
 
   /* ── 浮层定位（镜像 div 测量光标像素坐标） ── */
   // 自动保存：开关 + 周期都可配。关掉开关后只能手动保存（顶部按钮或 Ctrl+S）。
@@ -1420,6 +1476,7 @@ export function WritingEditor({
     const created = createSegment(text, index, caret);
     setSegments([...contextRef.current.outlineSegments, created]);
     setOutlineFocusKey(created.id);
+    onTaskEvent?.("outline-segment");
   }
 
   /** 把某段的起点改到光标所在段落；那里已经是别的段起点就不动。 */
@@ -1710,15 +1767,6 @@ export function WritingEditor({
         },
       },
       {
-        id: "consistency",
-        label: "校验这段的人设",
-        disabled: !proofreader.available || !proofreader.hasCharacters,
-        onSelect: () => {
-          setWorkbenchTab("proofread");
-          proofreader.runConsistency(true);
-        },
-      },
-      {
         id: "character",
         label: hasSelection ? `为「${selected.trim().slice(0, 8)}」建角色卡` : "打开角色面板",
         icon: "person",
@@ -1731,7 +1779,7 @@ export function WritingEditor({
                 ...materialsRef.current,
                 characters: [
                   ...materialsRef.current.characters,
-                  { id: crypto.randomUUID(), name, aliases: [], group: "main", background: "", personality: "", appearance: "", extra: [], inject: true },
+                  { id: crypto.randomUUID(), name, aliases: [], group: "main", background: "", personality: "", appearance: "", extra: [] },
                 ],
               });
             }
@@ -1778,9 +1826,9 @@ export function WritingEditor({
         label: `大纲 ${item.ordinal}/${item.count}`,
       });
     }
-    // 纠错：语病 / 人设 = 波浪线，单调 / 本地重复 = 底色；光标所在的那一处加重
+    // 纠错：语病 = 波浪线，单调 / 本地重复 = 底色；光标所在的那一处加重
     for (const issue of proofreader.issues) {
-      const kind = issue.kind === "grammar" || issue.kind === "consistency" ? "wavy" : "band";
+      const kind = issue.kind === "grammar" ? "wavy" : "band";
       const active = issue.id === proofreader.activeIssue?.id;
       for (const range of issue.ranges) list.push({ start: range.start, end: range.end, kind, tone: issue.kind, active });
     }
@@ -1812,11 +1860,13 @@ export function WritingEditor({
 
   const allNotices = [...promptPreview.notices, ...(windowNotice ? [windowNotice] : [])];
 
-  const peekKeyLabel = PEEK_KEY_SHORT[settings.peekKey];
-  const sampleKeyLabel = SAMPLE_KEY_SHORT[settings.sampleKey];
+  const hideKeyLabel = HOLD_KEY_SHORT[settings.hideKey];
+  // 两个键绑成同一个时只提示隐藏（隐藏优先），免得底栏写出两句一样的键
+  const expandKeyLabel = settings.expandKey === settings.hideKey ? "" : HOLD_KEY_SHORT[settings.expandKey];
+  const sampleKeyLabel = settings.sampleKey === "Off" ? "" : HOLD_KEY_SHORT[settings.sampleKey];
 
-  /** 浮层淡化：长按穿透键，或（开启「浮窗常驻」时）输入法正在组字。 */
-  const popoverFaded = peekActive || (isComposing && settings.keepPopover);
+  /** 浮层淡化：长按隐藏键期间，或（开启「浮窗常驻」时）输入法正在组字。不透明度用设置里的 fadeOpacity。 */
+  const popoverFaded = holdFaded || (isComposing && settings.keepPopover);
 
   const statusHint = isComposing
     ? settings.keepPopover
@@ -1831,8 +1881,8 @@ export function WritingEditor({
           : proofreader.activeIssue
             ? `${ISSUE_KIND_LABEL[proofreader.activeIssue.kind]}：${proofreader.activeIssue.message}${proofreader.activeIssue.suggestion ? ` → ${proofreader.activeIssue.suggestion}` : ""}`
           : settings.quickMode
-            ? `快速模式常驻 · 长按 ${peekKeyLabel} 暂时穿透浮层`
-            : `停顿后出现候选 · ↑↓ 选择 · Enter 插入${sampleKeyLabel ? ` · ${sampleKeyLabel}随机` : ""}`;
+            ? `快速模式常驻 · 长按${hideKeyLabel || "隐藏键"}暂时隐藏浮层`
+            : `停顿后出现候选 · ↑↓ 选择 · 数字键插入${expandKeyLabel ? ` · 长按 ${expandKeyLabel} 展开短句` : ""}${sampleKeyLabel ? ` · ${sampleKeyLabel} 随机` : ""}`;
 
   return (
     <div
@@ -2111,7 +2161,7 @@ export function WritingEditor({
                   }}
                   onBlur={() => {
                     editorFocusedRef.current = false;
-                    releasePeek();
+                    releaseHold();
                     closeCandidates();
                   }}
                   onKeyDown={handleEditorKeyDown}
@@ -2140,7 +2190,7 @@ export function WritingEditor({
           anchorHardLimit={promptPreview.hardLimit}
           notices={allNotices}
           anchorNotice={anchorNotice}
-          bodyLength={promptPreview.bodyEnd - promptPreview.bodyStart}
+          bodyLength={promptPreview.bodyChars}
           hits={hits}
           chapterIndex={chapterIndex}
           currentChapter={currentChapter}
@@ -2164,20 +2214,15 @@ export function WritingEditor({
             issues: proofreader.issues,
             activeIssueId: proofreader.activeIssue?.id ?? null,
             status: proofreader.status,
-            consistencyStatus: proofreader.consistencyStatus,
-            hasCharacters: proofreader.hasCharacters,
             ready: candidateSource.isDemo || backendStatus === "ready",
             available: proofreader.available,
             slots: backend.profile?.slots ?? 1,
             isDemo: proofreader.isDemo,
             auto: settings.proofreadAuto,
             local: settings.proofreadLocal,
-            consistencyAuto: settings.consistencyAuto,
             onAutoChange: (next) => onSettingChange("proofreadAuto", next),
             onLocalChange: (next) => onSettingChange("proofreadLocal", next),
-            onConsistencyAutoChange: (next) => onSettingChange("consistencyAuto", next),
             onCheckNow: () => proofreader.run(true),
-            onCheckConsistency: () => proofreader.runConsistency(true),
             onCancel: proofreader.cancel,
             onAccept: acceptIssue,
             onDismiss: proofreader.dismiss,
@@ -2188,7 +2233,7 @@ export function WritingEditor({
         <WorkbenchRail
           tab={workbenchTab}
           onSelectTab={setWorkbenchTab}
-          badges={{ context: hits.length > 0 ? Math.min(hits.length, 6) : 0, proofread: Math.min(proofreader.issues.length, 99) }}
+          badges={{ context: Math.min(hits.length, 99), proofread: Math.min(proofreader.issues.length, 99) }}
         />
       </main>
 
@@ -2234,7 +2279,7 @@ export function WritingEditor({
         </div>
       </footer>
 
-      {/* ══ 候选浮层 ══ */}
+      {/* ══ 候选浮层（长按隐藏键期间走淡化：淡到 fadeOpacity 并让出鼠标，按键全部放行给正文） ══ */}
       {candidateOpen && (
         <CandidatePopover
           ref={popoverRef}
@@ -2252,11 +2297,12 @@ export function WritingEditor({
           totalCount={candidateList.length}
           faded={popoverFaded}
           prefillChars={prefillChars}
-          peekKeyLabel={peekKeyLabel}
+          hideKeyLabel={hideKeyLabel}
+          expandKeyLabel={expandKeyLabel}
           sampleKeyLabel={sampleKeyLabel}
           expansions={visibleCandidates.map((_, index) => expander.rows[page * pageSize + index] ?? null)}
           expanding={expander.running}
-          expandHint={settings.expandEnabled && Boolean(sampleKeyLabel)}
+          expandHint={settings.expandEnabled && Boolean(expandKeyLabel)}
           onHover={(index) => setGlobalIndex(page * pageSize + index)}
           onPick={pickCandidate}
           onRetry={() => scheduleCandidates(contentRef.current, selectionRef.current, true)}

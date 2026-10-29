@@ -16,7 +16,9 @@ export function formatBytes(bytes: number | null): string {
 }
 
 export function errorText(caught: unknown, fallback: string): string {
-  return caught instanceof Error ? caught.message : fallback;
+  if (!(caught instanceof Error)) return fallback;
+  // 主进程抛的错到了页面会带一层 "Error invoking remote method 'xxx': Error: " 前缀，剥掉再显示。
+  return caught.message.replace(/^Error invoking remote method '[^']*': (Error: )?/, "") || fallback;
 }
 
 /** 默认选中第一块 GPU；没有 GPU 就不选（= 自动）。 */

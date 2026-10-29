@@ -40,6 +40,8 @@ export type {
   SetupCatalog,
   SetupProblem,
   SetupState,
+  UpdateInfo,
+  UpdateProgress,
   VramSource,
 } from "../../../shared/ipc";
 export type { UiBackendStatus as BackendStatus } from "../../../shared/ipc";

@@ -1,5 +1,5 @@
 /**
- * 通用补全数据源：纠错 / 人设校验等后台任务共用。
+ * 通用补全数据源：纠错等后台任务共用。
  *   Electron 里走 window.api.complete（主进程转发给 llama-server 的槽 1）；
  *   浏览器演示模式用 mock：返回一条示例结果，让界面流程可以走通。
  */
@@ -45,16 +45,6 @@ function fakeFindings(prompt: string): string {
   const bodyStart = prompt.lastIndexOf("正文：\n");
   const body = bodyStart === -1 ? prompt : prompt.slice(bodyStart + 3);
   const lines: string[] = [];
-  if (prompt.includes("设定卡：\n")) {
-    // 人设校验：拿第一张卡的名字 + 正文里它附近的一句当「示例矛盾」
-    const name = prompt.slice(prompt.indexOf("设定卡：\n") + 4).match(/^[【「]?([^】」：:｜\n|]{1,12})/u)?.[1]?.trim();
-    const at = name ? body.indexOf(name) : -1;
-    if (name && at !== -1) {
-      const sentence = body.slice(at, at + 30).split(/[\n，。！？；…]/u)[0];
-      if (sentence.length >= 6) return `${name}|${sentence}|演示模式：示例矛盾（与设定卡不符）\n`;
-    }
-    return "无";
-  }
   const sentence = body.match(/[^\n，。！？；…]{10,30}[，。！？；…]/u);
   if (sentence) lines.push(`A|${sentence[0]}|演示模式：示例语病|${sentence[0].replace(/[，。！？；…]$/u, "。")}`);
   const seen = new Map<string, number>();

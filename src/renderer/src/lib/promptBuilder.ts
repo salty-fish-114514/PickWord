@@ -6,6 +6,9 @@
  *   2. 按「风格开关 / 大纲开关」四种组合拼出最终 prompt，
  *   3. 把过程中的让步与风险以 notices（提示文案）返回给 UI。
  *
+ * assistant 回合的拼法（与纠错 / 校验逐字节同源，便于 SFT）：
+ *   assistantOpen + 空思考块 + [大纲：…] + 正文：\n + 正文
+ *
  * 两种正文来源，互斥：
  *   ● 锚点模式（大纲开启 + 已锚定）：
  *       body = docText[anchor, cursor)。绝不截断、绝不启动滑动窗口；
@@ -28,6 +31,7 @@
 
 import { CHATML_TEMPLATE, type PromptTemplate } from "../../../shared/modelProfile";
 import type { PromptMode } from "../../../shared/ipc";
+import { countChars } from "../../../shared/text";
 import { stripChapterMarks } from "./chapters";
 
 export type { PromptMode };
@@ -69,8 +73,6 @@ export interface BuildPromptArgs {
   styleText?: string;
   /** 已开启且非空的大纲文本；未开启传 undefined。 */
   outlineText?: string;
-  /** 命中的角色 / 设定卡片文本（见 lib/materials.ts）；没有传 undefined。 */
-  materialsText?: string;
   /** 编辑器全文。 */
   docText: string;
   /** 光标位置（字符偏移）。 */
@@ -87,6 +89,11 @@ export interface BuildPromptArgs {
   modelContextLen?: number;
   /** 对话模板（来自 ModelProfile），缺省 ChatML。 */
   template?: PromptTemplate;
+  /**
+   * 非思考模式下 assistant 回合开头的空思考块（见 ModelProfile.noThinkPrefix）。
+   * 与纠错 / 校验用的是同一个值：两条链路的回合格式逐字节一致，微调样本可以共用一套拼法。
+   */
+  noThinkPrefix?: string;
 }
 
 export interface BuiltPrompt {
@@ -97,6 +104,8 @@ export interface BuiltPrompt {
   /** 本次 body 在文档中的起止偏移（UI 用来给这段正文加浅背景）。 */
   bodyStart: number;
   bodyEnd: number;
+  /** 真正送出去的正文有多少字（已删掉章节标记行、按 countChars 口径，不含空白）。 */
+  bodyChars: number;
   /** 本次是否处于锚点模式。 */
   anchored: boolean;
   /** 锚点正文已超过硬上限：本次 prompt 已按「无大纲、滑窗」兜底生成，App 应当退出锚点模式。 */
@@ -131,15 +140,22 @@ function normalize(text: string | undefined): string | undefined {
  * 拼接核心：给定（已归一化的）风格 / 大纲 / 正文，返回 prompt 与模式。
  *
  * 四种模式只是 system 文案与 assistant 段开头不同；对话标记来自 template（ChatML / Gemma / Llama3），
- * 由主进程按模型推断后随 ModelProfile 下发。assistant 段以「正文：」结尾，让模型直接接着写。
- * 风格文本在 system 段最前面且不变，前缀缓存必然命中，所以它可以很长。
+ * 由主进程按模型推断后随 ModelProfile 下发。assistant 段依次是「空思考块 → 大纲 → 正文：」，
+ * 让模型直接接着写。风格文本在 system 段最前面且不变，前缀缓存必然命中，所以它可以很长。
+ *
+ * ★ 空思考块（2026-10-25 起与纠错统一）：有思考开关的模型（Qwen3 / Qwen3.5）在
+ *   enable_thinking=false 时，官方 chat_template 就是在 assistant 回合开头注入 `<think>\n\n
+</think>
+
+\n\n`，
+ *   底模的分布就是这么训出来的。续写与指令类任务用同一个字面量，SFT 样本才能共用一套拼法。
  */
 function assemble(
   style: string | undefined,
   outline: string | undefined,
   body: string,
   template: PromptTemplate = CHATML_TEMPLATE,
-  materials?: string,
+  noThinkPrefix = "",
 ): { prompt: string; mode: PromptMode } {
   let mode: PromptMode;
   let systemText: string;
@@ -156,10 +172,8 @@ function assemble(
     mode = "full";
     systemText = `${SYSTEM_FULL}\n${style}`;
   }
-  // 人物与设定放在大纲之前：它们比大纲更稳定（命中集合是黏性的），变化时尽量少波及后面的缓存。
-  const materialsBlock = materials ? `人物与设定：\n${materials}\n\n` : "";
   const outlineBlock = outline ? `大纲：\n${outline}\n\n` : "";
-  const assistantText = `${materialsBlock}${outlineBlock}正文：\n${body}`;
+  const assistantText = `${noThinkPrefix}${outlineBlock}正文：\n${body}`;
   const prompt =
     template.systemOpen +
     systemText +
@@ -176,14 +190,14 @@ function assemble(
    二、硬上限
    ════════════════════════════════════════════════════════════════ */
 
-/** 风格 / 大纲 / 素材 / 模板本身占用的字符数（= 正文为空时的 prompt 长度）。 */
+/** 风格 / 大纲 / 模板 / 空思考块本身占用的字符数（= 正文为空时的 prompt 长度）。 */
 export function promptOverheadChars(
   style?: string,
   outline?: string,
   template?: PromptTemplate,
-  materials?: string,
+  noThinkPrefix?: string,
 ): number {
-  return assemble(normalize(style), normalize(outline), "", template, normalize(materials)).prompt.length;
+  return assemble(normalize(style), normalize(outline), "", template, noThinkPrefix ?? "").prompt.length;
 }
 
 /** 正文硬上限（字符数）。 */
@@ -192,11 +206,11 @@ export function bodyHardLimit(
   style?: string,
   outline?: string,
   template?: PromptTemplate,
-  materials?: string,
+  noThinkPrefix?: string,
 ): number {
   return Math.max(
     MIN_BODY_BUDGET,
-    modelContextLen - OUTPUT_RESERVE_TOKENS - promptOverheadChars(style, outline, template, materials),
+    modelContextLen - OUTPUT_RESERVE_TOKENS - promptOverheadChars(style, outline, template, noThinkPrefix),
   );
 }
 
@@ -206,7 +220,7 @@ export function hardLimitFor(args: BuildPromptArgs): number {
     args.styleText,
     args.outlineText,
     args.template,
-    args.materialsText,
+    args.noThinkPrefix,
   );
 }
 
@@ -392,15 +406,16 @@ export function buildPrompt(args: BuildPromptArgs): BuiltPrompt {
   const { start, anchored, notices } = resolveBodyRange(args, Boolean(outline));
   const bodyEnd = Math.max(0, Math.min(args.cursorOffset, args.docText.length));
   const bodyStart = Math.min(Math.max(0, start), bodyEnd);
-  // 章节标记行 `--标题--` 只对编辑器有意义，送给模型时还原成普通的标题行。
+  // 章节标记行 `--标题--` 只对编辑器有意义：送入模型前整行删掉，标题与序号都不进提示词。
   const body = stripChapterMarks(args.docText.slice(bodyStart, bodyEnd));
 
-  const { prompt, mode } = assemble(style, outline, body, args.template, normalize(args.materialsText));
+  const { prompt, mode } = assemble(style, outline, body, args.template, args.noThinkPrefix ?? "");
   return {
     prompt,
     mode,
     bodyStart,
     bodyEnd,
+    bodyChars: countChars(body),
     anchored,
     anchorOverflow: false,
     hardLimit: hardLimitFor(args),

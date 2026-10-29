@@ -611,6 +611,14 @@
   line-height: 1.7;
 }
 
+/* 空列表 / 启动失败时下面那排修复按钮（重试启动 / 打开日志 / 换引擎）。 */
+.setup-device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
 
 /* ═══════ § W8. 按钮与脚注 ═══════ */
 

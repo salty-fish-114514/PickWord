@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { formatBytes } from "./setupUtils";
 import type { BackendDeviceInfo } from "../../lib/types";
 
@@ -10,18 +12,25 @@ interface DevicePickerProps {
   allowAuto?: boolean;
   disabled?: boolean;
   onSelect: (deviceId: string) => void;
+  /** 空列表时的说明；不给就用默认那句（首页「模型与推理」面板走默认）。 */
+  emptyHint?: string;
+  /** 空列表时附在下面的操作（向导里放「改用 Vulkan」按钮）。 */
+  emptyAction?: ReactNode;
 }
 
 /** llama-server --list-devices 结果的单选列表（向导第 4 步与「模型与推理」面板共用）。 */
-export function DevicePicker({ devices, querying, selected, allowAuto = false, disabled, onSelect }: DevicePickerProps) {
+export function DevicePicker({ devices, querying, selected, allowAuto = false, disabled, onSelect, emptyHint, emptyAction }: DevicePickerProps) {
   if (querying) return <p className="setup-device-hint">正在查询可用计算设备…</p>;
   if (devices.length === 0) {
     return (
-      <p className="setup-device-empty">
-        未检测到可用的 GPU 设备（纯 CPU 引擎也会显示为空）。将使用默认设备配置启动服务。
-        <br />
-        <small>可在启动后随时在「模型与推理」里重新查询或切换引擎。</small>
-      </p>
+      <>
+        <p className="setup-device-empty">
+          {emptyHint ?? "未检测到可用的 GPU 设备（纯 CPU 引擎也会显示为空）。将使用默认设备配置启动服务。"}
+          <br />
+          <small>可在启动后随时在「模型与推理」里重新查询或切换引擎。</small>
+        </p>
+        {emptyAction}
+      </>
     );
   }
   return (

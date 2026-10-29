@@ -1,12 +1,12 @@
 /**
- * 角色卡 / 设定条目在编辑器里的三件事：
- *   ① 命中检测 —— 哪些卡片的名字（或别名）出现在送入模型的正文窗口里；
- *   ② 注入文本 —— 把命中的卡片压成一段紧凑的「人物与设定」文本，放进提示词；
- *   ③ 候选提取 —— 从正文里找高频的 2~4 字片段，帮作者快速建卡（纯本地统计，不调模型）。
+ * 角色卡 / 设定条目的纯脚本辅助（一律不调模型）：
+ *   ① 命中检测 —— 哪些卡片的名字（或别名）出现在当前正文窗口里，面板当信息展示；
+ *   ② 提及统计 —— 每张卡在本章 / 全文出现多少次；
+ *   ③ 候选提取 —— 从正文里找高频的 2~4 字片段，帮作者快速建卡。
  *
- * 注入放在大纲之前、正文之后的位置之外（见 promptBuilder.assemble），所以命中集合一变，
- * 正文的 KV 缓存就要重算。为了少折腾，命中集合是「黏性」的：窗口起点不动时只增不减，
- * 新角色出场才会触发一次重算（与滑窗推进 / 锚点变化本来就会触发的重算同级）。
+ * ★ 2026-10-25 起卡片内容不再进入任何提示词（人设校验也一并删除）：小模型拿设定卡做不好，
+ *   误报漏报都高，还会因为章标题里的名字触发莫名其妙的注入。现在这些名字只用于
+ *   本地统计与 lib/monotony.ts 的专名变体 / 重复白名单。
  */
 
 import type { CharacterCard, LoreEntry, Materials } from "./types";
@@ -46,14 +46,13 @@ function countOccurrences(haystack: string, names: string[]): { count: number; f
   return { count, first };
 }
 
-/** 在 text[start, end) 里找出现过的卡片（只看 inject=true 且有名字的）。 */
+/** 在 text[start, end) 里找出现过的卡片（只看有名字的；纯展示用，不影响提示词）。 */
 export function findMaterialHits(materials: Materials, text: string, start: number, end: number): MaterialHit[] {
   const body = text.slice(Math.max(0, start), Math.max(start, end));
   if (!body) return [];
   const hits: MaterialHit[] = [];
   const scan = (kind: MaterialHit["kind"], cards: Array<CharacterCard | LoreEntry>) => {
     for (const card of cards) {
-      if (!card.inject) continue;
       const { count, first } = countOccurrences(body, namesOf(card));
       if (count > 0) hits.push({ kind, id: card.id, name: card.name || card.aliases[0] || "", count, first: start + first });
     }
@@ -70,69 +69,7 @@ export function countMentions(cards: Array<CharacterCard | LoreEntry>, text: str
   return out;
 }
 
-/* ───────── ② 注入文本 ───────── */
-
-/** 一次最多注入多少张卡、每张卡最多多少字（超出的从末尾截断，不改前面的文字以保住缓存）。 */
-export const MAX_INJECTED_CARDS = 6;
-export const MAX_CARD_CHARS = 400;
-
-function clip(text: string, max: number): string {
-  const trimmed = text.trim();
-  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
-}
-
-export function characterCardText(card: CharacterCard): string {
-  const parts: string[] = [];
-  if (card.aliases.length > 0) parts.push(`别名：${card.aliases.join("、")}`);
-  if (card.background.trim()) parts.push(`背景：${card.background.trim()}`);
-  if (card.personality.trim()) parts.push(`性格：${card.personality.trim()}`);
-  if (card.appearance.trim()) parts.push(`外观：${card.appearance.trim()}`);
-  for (const field of card.extra) {
-    if (field.text.trim()) parts.push(`${field.label.trim() || "补充"}：${field.text.trim()}`);
-  }
-  return clip(`${card.name}${parts.length > 0 ? "｜" : ""}${parts.join("；")}`, MAX_CARD_CHARS);
-}
-
-export function loreEntryText(entry: LoreEntry): string {
-  const alias = entry.aliases.length > 0 ? `（${entry.aliases.join("、")}）` : "";
-  return clip(`${entry.name}${alias}：${entry.text.trim()}`, MAX_CARD_CHARS);
-}
-
-/** 把命中的卡片拼成提示词里的「人物与设定」段；没有命中返回空串。 */
-export function buildMaterialsText(materials: Materials, hits: MaterialHit[]): string {
-  const picked = hits.slice(0, MAX_INJECTED_CARDS);
-  const lines: string[] = [];
-  for (const hit of picked) {
-    if (hit.kind === "character") {
-      const card = materials.characters.find((c) => c.id === hit.id);
-      if (card) lines.push(characterCardText(card));
-    } else {
-      const entry = materials.lore.find((l) => l.id === hit.id);
-      if (entry) lines.push(loreEntryText(entry));
-    }
-  }
-  return lines.join("\n");
-}
-
-/**
- * 黏性命中集合：窗口起点没变时，旧命中保留、新命中追加；窗口起点变了就重算。
- * 返回新的集合（顺序稳定：先旧后新）。
- */
-export function mergeStickyHits(previous: { bodyStart: number; hits: MaterialHit[] } | null, bodyStart: number, fresh: MaterialHit[]): MaterialHit[] {
-  if (!previous || previous.bodyStart !== bodyStart) return fresh;
-  const known = new Set(previous.hits.map((h) => `${h.kind}:${h.id}`));
-  const merged = [...previous.hits];
-  for (const hit of fresh) {
-    const key = `${hit.kind}:${hit.id}`;
-    if (!known.has(key)) {
-      merged.push(hit);
-      known.add(key);
-    }
-  }
-  return merged;
-}
-
-/* ───────── ③ 候选提取 ───────── */
+/* ───────── ② 候选提取 ───────── */
 
 export interface ExtractedName {
   text: string;
@@ -230,12 +167,11 @@ export function newCharacterCard(name: string): CharacterCard {
     personality: "",
     appearance: "",
     extra: [],
-    inject: true,
   };
 }
 
 export function newLoreEntry(name: string, category: LoreEntry["category"] = "other"): LoreEntry {
-  return { id: crypto.randomUUID(), name, aliases: [], category, text: "", inject: true };
+  return { id: crypto.randomUUID(), name, aliases: [], category, text: "" };
 }
 
 export function parseAliases(raw: string): string[] {

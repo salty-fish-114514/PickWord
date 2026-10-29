@@ -27,7 +27,9 @@ export interface WorkbenchProps {
   anchorHardLimit: number;
   notices: string[];
   anchorNotice: string | null;
+  /** 本次真正送进 prompt 的正文字数（已去掉章节标记行与空白）。 */
   bodyLength: number;
+  /** 当前正文窗口里命中的卡片名字：只做展示与本地统计，不进提示词。 */
   hits: MaterialHit[];
 
   /* 大纲段（lib/outline.ts） */
@@ -127,7 +129,6 @@ export function WorkbenchPanel(props: WorkbenchProps) {
           bodyLength={props.bodyLength}
           hits={props.hits}
           materials={props.materials}
-          onMaterialsChange={props.onMaterialsChange}
           currentChapter={props.currentChapter}
           onOpenTab={onSelectTab}
         />

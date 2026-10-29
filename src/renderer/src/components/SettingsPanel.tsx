@@ -3,20 +3,17 @@ import { useState } from "react";
 import { Icon } from "./Icon";
 import type { LibraryDirectory } from "../lib/types";
 import {
-  isPeekKey,
-  isSampleKey,
-  PEEK_KEY_LABEL,
+  HOLD_KEY_LABEL,
   SAMPLE_KEY_LABEL,
+  isHoldKey,
   SETTING_LIMITS,
-  type PeekKey,
-  TIER_LABEL,
-  TIER_PRESETS,
-  TIER_SLOTS,
-  detectTier,
-  type ComputeTier,
-  type SampleKey,
+  applyPreset,
+  detectPreset,
+  formatSeconds,
+  type HoldKey,
   type SettingsValues,
 } from "../lib/settings";
+import { PresetCards } from "./PresetCards";
 
 /** 百分比显示的设置项（内部存 0~1）：把范围也换算成百分比。 */
 function percentLimits(key: "eosMinProb" | "fadeOpacity") {
@@ -111,43 +108,31 @@ function SelectSetting<T extends string>({
   );
 }
 
-/** 算力档位：一键拨好几个自动项；单项另改过就显示「自定义」。 */
-function TierSetting({
+/** 写作节奏预设：一键把六项自动参数拨到一套选好的默认值；单项另改过就显示「自定义」。 */
+function PresetSetting({
   values,
   detectedSlots,
-  onApply,
+  onChange,
   onOpenBackendSettings,
 }: {
   values: SettingsValues;
   detectedSlots: number | null;
-  onApply: (tier: ComputeTier) => void;
+  onChange: <K extends keyof SettingsValues>(key: K, value: SettingsValues[K]) => void;
   onOpenBackendSettings?: () => void;
 }) {
-  const current = detectTier(values);
-  const needSlots = current === "high" && detectedSlots !== null && detectedSlots < TIER_SLOTS.high;
+  const current = detectPreset(values);
+  const needSlots = detectedSlots !== null && detectedSlots < 2;
   return (
     <div className="setting-block theme-block">
-      <span className="setting-title">算力档位{current === "custom" ? "（自定义）" : ""}</span>
-      <div className="theme-options tier-options" role="group" aria-label="算力档位">
-        {(["low", "mid", "high"] as const).map((tier) => (
-          <button
-            key={tier}
-            className={`theme-option ${current === tier ? "is-selected" : ""}`}
-            type="button"
-            aria-pressed={current === tier}
-            onClick={() => onApply(tier)}
-          >
-            <span>{TIER_LABEL[tier]}</span>
-          </button>
-        ))}
-      </div>
+      <span className="setting-title">写作节奏{current === "custom" ? "（自定义）" : ""}</span>
+      <PresetCards values={values} onApply={(name) => applyPreset(name, values, onChange)} />
       <p className="setting-hint">
-        {current === "custom" ? "下面的自动项已单独改过；点一档可整体恢复。" : TIER_DESCRIPTION[current]}{" "}
-        槽 0 出候选和展开，槽 1 纠错，槽 2 人设校验；这些自动项也可以在下面和「纠错」页单独开关。
+        {current === "custom" ? "下面的自动项已单独改过；点一张卡可整体恢复。" : "随时可以在下面逐项调整；调过任何一项即变为「自定义」。"}{" "}
+        槽 0 出候选和展开，槽 1 纠错；这些自动项也可以在下面和「纠错」页单独开关。
       </p>
       {needSlots && (
         <p className="setting-hint is-warning">
-          本地模型目前只有 {detectedSlots} 个槽位，人设校验会排在纠错后面。到「模型与推理」把「并行槽位」设为 3 才能并行。
+          本地模型目前只有 {detectedSlots} 个槽位，自动纠错用不上（它会和候选抢上下文缓存）。到「模型与推理」把「并行槽位」设为 2 即可启用。
           {onOpenBackendSettings && (
             <>
               {" "}
@@ -208,15 +193,17 @@ interface SettingsPanelProps {
   onOpenBackendSettings?: () => void;
   /** 后端实际生效的上下文长度（来自 ModelProfile）；有值时滑杆只作兜底。 */
   detectedContextLen?: number | null;
-  /** 后端实际的并行槽位数；「高」档需要 3 个。 */
+  /** 后端实际的并行槽位数；自动纠错需要 2 个。 */
   detectedSlots?: number | null;
+  /** 当前应用版本（基本页「关于与更新」显示用）；浏览器演示里拿不到。 */
+  appVersion?: string | null;
+  /** 检查更新 / 下载进行中：按钮转「正在检查…」并禁用。 */
+  updateBusy?: boolean;
+  /** 手动检查更新：结果永远弹 UpdateDialog（含「已是最新」）。 */
+  onCheckUpdate?: () => void;
+  /** 重看新手引导（App 重新弹 OnboardingFlow）。 */
+  onReplayOnboarding?: () => void;
 }
-
-const TIER_DESCRIPTION: Record<ComputeTier, string> = {
-  low: "只出候选；短句展开、纠错、人设校验都手动触发。2 个槽位。",
-  mid: "停笔 2 秒自动展开短句，停笔后自动纠错；人设校验手动。2 个槽位。",
-  high: "候选一出就展开，自动纠错并随纠错校验人设（第 3 个槽位并行）。",
-};
 
 /**
  * 设置面板：两页。
@@ -236,6 +223,10 @@ export function SettingsPanel({
   onOpenBackendSettings,
   detectedContextLen,
   detectedSlots = null,
+  appVersion = null,
+  updateBusy = false,
+  onCheckUpdate,
+  onReplayOnboarding,
 }: SettingsPanelProps) {
   const [page, setPage] = useState<"basic" | "advanced">("basic");
 
@@ -288,12 +279,13 @@ export function SettingsPanel({
           />
           <RangeSetting
             id="trigger-delay"
-            label="触发延迟"
+            label="停笔多久后出候选"
             value={values.triggerDelay}
             {...SETTING_LIMITS.triggerDelay}
-            unit="毫秒"
-            minLabel="200 毫秒"
-            maxLabel="1000 毫秒"
+            unit="秒"
+            minLabel="0.2 秒"
+            maxLabel="10 秒"
+            format={formatSeconds}
             hint="快速模式开启时此项不生效：浮层常驻且零延迟。"
             onChange={(value) => onChange("triggerDelay", value)}
           />
@@ -344,20 +336,16 @@ export function SettingsPanel({
             </div>
           </div>
 
-          <TierSetting
+          <PresetSetting
             values={values}
             detectedSlots={detectedSlots ?? null}
-            onApply={(tier) => {
-              for (const [key, value] of Object.entries(TIER_PRESETS[tier]) as [keyof typeof TIER_PRESETS.low, boolean | number][]) {
-                if (values[key] !== value) onChange(key, value as never);
-              }
-            }}
+            onChange={onChange}
             onOpenBackendSettings={onOpenBackendSettings}
           />
 
           <SwitchSetting
             title="快速模式"
-            description="浮层常驻、零延迟刷新。长按穿透键可暂时淡出浮层并正常输入数字、回车、空格。"
+            description="浮层常驻、零延迟刷新。长按隐藏键可暂时收起浮层，按住期间所有按键照常进正文。"
             checked={values.quickMode}
             onToggle={() => onChange("quickMode", !values.quickMode)}
           />
@@ -369,7 +357,7 @@ export function SettingsPanel({
           />
           <SwitchSetting
             title="短句展开"
-            description="长按随机取词键，浮窗里的候选依次从词长成短句（流式）；数字键 / Enter 接受整句，流到一半按下就取已显示的部分。"
+            description="长按展开键，浮窗里的候选依次从词长成短句（流式）；数字键接受整句，流到一半按下就取已显示的部分。也可以停笔自动展开。"
             checked={values.expandEnabled}
             onToggle={() => onChange("expandEnabled", !values.expandEnabled)}
           />
@@ -387,8 +375,8 @@ export function SettingsPanel({
               {...SETTING_LIMITS.expandIdleMs}
               unit="秒"
               minLabel="0.25 秒（候选一出就展开）"
-              maxLabel="10 秒"
-              format={(value) => `${(value / 1000).toFixed(value % 1000 === 0 ? 0 : 2)} 秒`}
+              maxLabel="60 秒"
+              format={formatSeconds}
               hint="调到最小就是「总是自动展开」；每轮展开约 5 次短解码，设得太短时连续写作显卡会一直有活干。"
               onChange={(value) => onChange("expandIdleMs", value)}
             />
@@ -402,6 +390,28 @@ export function SettingsPanel({
                 打开「模型与推理」
               </button>
               <p className="setting-hint reconfigure-warning">⚠ 应用新配置时模型会重新加载，候选功能会短暂中断。</p>
+            </div>
+          )}
+
+          {onReplayOnboarding && (
+            <div className="setting-block">
+              <span className="setting-title">新手引导</span>
+              <p className="setting-hint">忘了哪个功能在哪？两分钟重新过一遍。</p>
+              <button className="quiet-button" type="button" onClick={onReplayOnboarding}>
+                重看新手引导
+              </button>
+            </div>
+          )}
+
+          {onCheckUpdate && (
+            <div className="setting-block">
+              <span className="setting-title">关于与更新</span>
+              <p className="setting-hint">
+                当前版本 v{appVersion ?? "演示模式"}。覆盖安装新版本不会动你的设置、文库和已部署的模型。
+              </p>
+              <button className="quiet-button quiet-button-accent" type="button" disabled={updateBusy} onClick={onCheckUpdate}>
+                {updateBusy ? "正在检查…" : "检查更新"}
+              </button>
             </div>
           )}
 
@@ -478,7 +488,7 @@ export function SettingsPanel({
             minLabel="1.0（原始）"
             maxLabel="4.0（最平）"
             format={(value) => value.toFixed(1)}
-            hint="越大，低频词的百分比越「好看」。只影响展示与随机取词，不影响模型。"
+            hint="越大，低频词的百分比越「好看」。只影响浮窗里显示的百分比，不影响模型输出。"
             onChange={(value) => onChange("softenTemperature", value)}
           />
           <RangeSetting
@@ -537,38 +547,55 @@ export function SettingsPanel({
             minLabel="5%（几乎隐形）"
             maxLabel="60%"
             format={(value) => `${value}%`}
-            hint="长按穿透键、以及「浮窗常驻」时输入法组字，浮窗会淡化到这个不透明度。"
+            hint="长按隐藏浮窗键、以及「浮窗常驻」时用输入法组字，浮窗都会淡化到这个不透明度。"
             onChange={(value) => onChange("fadeOpacity", value / 100)}
           />
-          <SelectSetting<PeekKey>
-            id="peek-key"
-            label="穿透键（长按淡出浮层）"
-            value={values.peekKey}
-            options={PEEK_KEY_LABEL}
-            hint="长按它时浮层淡化，数字、回车、空格原样输入。选 Tab 时，短按 Tab 仍是普通的制表符输入。"
+          <SelectSetting<HoldKey>
+            id="hide-key"
+            label="隐藏浮窗键（长按生效）"
+            value={values.hideKey}
+            options={HOLD_KEY_LABEL}
+            hint="按住它浮窗淡出（用下面「浮窗淡化透明度」的不透明度，并让出鼠标）、按键全部照常输入正文，松开就恢复。短按就是正常输入这个键（空格照打空格）。"
             onChange={(value) => {
-              if (isPeekKey(value)) onChange("peekKey", value);
+              if (isHoldKey(value)) onChange("hideKey", value);
             }}
           />
-          <RangeSetting
-            id="peek-hold"
-            label="长按判定时长"
-            value={values.peekHoldMs}
-            {...SETTING_LIMITS.peekHoldMs}
-            unit="毫秒"
-            minLabel="150 毫秒"
-            maxLabel="600 毫秒"
-            onChange={(value) => onChange("peekHoldMs", value)}
+          <SelectSetting<HoldKey>
+            id="expand-key"
+            label="展开短句键（长按生效）"
+            value={values.expandKey}
+            options={HOLD_KEY_LABEL}
+            hint="按住它把当前页的候选逐行展开成短句；短按同样是正常输入这个键。"
+            onChange={(value) => {
+              if (isHoldKey(value)) onChange("expandKey", value);
+            }}
           />
-          <SelectSetting<SampleKey>
+          {values.expandKey === values.hideKey && values.expandKey !== "Off" && (
+            <p className="setting-hint is-warning">两个键绑成了同一个：长按只会隐藏浮窗，展开短句改用右键菜单或「停笔后自动展开」。</p>
+          )}
+          <SelectSetting<HoldKey>
             id="sample-key"
             label="随机取词键"
             value={values.sampleKey}
             options={SAMPLE_KEY_LABEL}
-            hint="浮层打开时按它，按概率随机抽一个候选插入。设为「关闭」即可把空格让出来。"
+            hint="浮窗打开时按它，按概率从全部候选里随机抽一个插入。默认不绑定；绑到隐藏/展开键上时，长按仍是隐藏/展开，短按变成取词。"
             onChange={(value) => {
-              if (isSampleKey(value)) onChange("sampleKey", value);
+              if (isHoldKey(value)) onChange("sampleKey", value);
             }}
+          />
+          {values.sampleKey !== "Off" && (values.sampleKey === values.hideKey || values.sampleKey === values.expandKey) && (
+            <p className="setting-hint is-warning">随机取词与长按键同键：短按=取词（不再输入这个键本身），长按=隐藏/展开。</p>
+          )}
+          <RangeSetting
+            id="hold-ms"
+            label="长按判定时长"
+            value={values.holdMs}
+            {...SETTING_LIMITS.holdMs}
+            unit="毫秒"
+            minLabel="150 毫秒"
+            maxLabel="600 毫秒"
+            hint="按住多久算「长按」，隐藏浮窗与展开短句共用。"
+            onChange={(value) => onChange("holdMs", value)}
           />
 
           <button className="quiet-button reset-button" type="button" onClick={onResetAdvanced}>
@@ -578,7 +605,7 @@ export function SettingsPanel({
       )}
 
       <p className="settings-footnote">
-        浮层打开时：↑↓ 选择 · Enter 插入 · 1~9 直接插入 · PageUp / PageDown 翻页 · Esc 收起。
+        浮层打开时：1~9 插入 · ↑↓ 选择 · PageUp / PageDown 翻页 · Esc 收起 · 长按隐藏键暂时收起浮窗。Enter 与空格都照常输入，不再被浮层占用。
       </p>
     </aside>
   );

@@ -1,59 +1,48 @@
 /**
- * 纠错 / 人设校验的编排：窗口 → 请求（槽 1 / 槽 2）→ 解析定位 → 合并；本地提示的防抖计算；
+ * 纠错的编排：窗口 → 请求（槽 1）→ 解析定位 → 合并；本地提示的防抖计算；
  * 两层结果随编辑平移；忽略 / 清除。编辑器只负责把编辑事件喂进来、把结果画出来。
  *
- * 两个模型任务共用一条管线（proofread.ts），只差提示词 / 文法 / 解析器：
- *   proofread    槽 1，语病 + 单调；手动或停笔自动
- *   consistency  槽 2（≥ 3 槽位）否则排在槽 1 的队列里；手动，或随纠错一起（consistencyAuto）
+ * 槽位：槽 0 留给候选 + 短句展开，纠错固定用槽 1（槽位不够时直接不可用，面板会说明怎么开）。
+ *
+ * ★ 人设校验（角色卡 × 正文）已于 2026-10-25 删除：小模型做不稳，误报漏报都高。
+ *   人物与设定从此不与模型交互；lib/materials.ts 的正则统计与 lib/monotony.ts 的本地提示照旧。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { chooseCompletionSource } from "./completion";
 import { mapOffsetThroughEdit, paragraphStartAt, type EditSpan } from "./editorText";
-import { buildMaterialsText, findMaterialHits } from "./materials";
 import { findLocalHints } from "./monotony";
 import {
-  CONSISTENCY_GRAMMAR,
-  CONSISTENCY_SAMPLING,
   PROOFREAD_GRAMMAR,
   PROOFREAD_SAMPLING,
   PROOF_IDLE_MS,
   PROOF_MIN_NEW_CHARS,
   PROOF_MIN_WINDOW,
-  buildConsistencyPrompt,
   buildProofreadPrompt,
   findingsToIssues,
   issueAtOffset,
   mapIssuesThroughEdit,
   maskChapterMarks,
   mergeLlmIssues,
-  parseConsistencyFindings,
   parseFindings,
   resolveProofWindow,
   type Issue,
   type IssueKind,
   type ProofWindow,
 } from "./proofread";
-import type { Materials, PromptTemplate } from "./types";
+import type { PromptTemplate } from "./types";
 import type { ProofStatus } from "../components/workbench/ProofreadTab";
 
 const completionSource = chooseCompletionSource();
 
-export type ProofTask = "proofread" | "consistency";
-
 /** 纠错用的槽位：槽 0 留给候选 + 展开。 */
 export const PROOFREAD_SLOT = 1;
-/** 人设校验：有第 3 个槽位就并行，否则排在纠错后面共用槽 1。 */
-export const CONSISTENCY_SLOT = 2;
+/** 纠错窗口覆盖的问题类别（合并时只替换这些）。 */
+const PROOFREAD_KINDS: ReadonlySet<IssueKind> = new Set<IssueKind>(["grammar", "monotony"]);
 /** 本地提示：光标前后各看多远。 */
 const LOCAL_BACK = 15000;
 const LOCAL_AHEAD = 3000;
 const LOCAL_DEBOUNCE_MS = 600;
-
-const TASK_KINDS: Record<ProofTask, ReadonlySet<IssueKind>> = {
-  proofread: new Set<IssueKind>(["grammar", "monotony"]),
-  consistency: new Set<IssueKind>(["consistency"]),
-};
 
 export interface ProofreaderArgs {
   content: string;
@@ -66,9 +55,6 @@ export interface ProofreaderArgs {
   slots: number;
   auto: boolean;
   local: boolean;
-  /** 纠错跑完后顺带校验同一窗口的人设。 */
-  consistencyAuto: boolean;
-  materials: Materials;
   /** 人名与别名：本地提示不把它们当重复，同时用来查专名写法。 */
   ignoreNames: readonly string[];
 }
@@ -77,13 +63,9 @@ export interface Proofreader {
   issues: Issue[];
   activeIssue: Issue | null;
   status: ProofStatus;
-  consistencyStatus: ProofStatus;
   available: boolean;
   isDemo: boolean;
-  /** 有没有建过角色卡（没有就不必显示校验按钮的可用态）。 */
-  hasCharacters: boolean;
   run: (manual: boolean) => void;
-  runConsistency: (manual: boolean) => void;
   cancel: () => void;
   dismiss: (issue: Issue) => void;
   clearAll: () => void;
@@ -92,29 +74,24 @@ export interface Proofreader {
 }
 
 export function useProofreader(args: ProofreaderArgs): Proofreader {
-  const { content, caret, template, noThinkPrefix, backendReady, slots, auto, local, consistencyAuto, materials, ignoreNames } = args;
+  const { content, caret, template, noThinkPrefix, backendReady, slots, auto, local, ignoreNames } = args;
   const isDemo = completionSource.isDemo;
   const available = backendReady && (isDemo || slots > PROOFREAD_SLOT);
 
   const [llmIssues, setLlmIssues] = useState<Issue[]>([]);
   const [localIssues, setLocalIssues] = useState<Issue[]>([]);
   const [status, setStatus] = useState<ProofStatus>({ state: "idle" });
-  const [consistencyStatus, setConsistencyStatus] = useState<ProofStatus>({ state: "idle" });
 
   const contentRef = useRef(content);
   const caretRef = useRef(caret);
   const templateRef = useRef(template);
   const noThinkRef = useRef(noThinkPrefix);
-  const materialsRef = useRef(materials);
-  const consistencyAutoRef = useRef(consistencyAuto);
   const slotsRef = useRef(slots);
   useLayoutEffect(() => {
     contentRef.current = content;
     caretRef.current = caret;
     templateRef.current = template;
     noThinkRef.current = noThinkPrefix;
-    materialsRef.current = materials;
-    consistencyAutoRef.current = consistencyAuto;
     slotsRef.current = slots;
   });
 
@@ -122,13 +99,9 @@ export function useProofreader(args: ProofreaderArgs): Proofreader {
   const windowStartRef = useRef<number | null>(null);
   /** 自上次检查以来新写的字数（只数插入），光标跳来跳去也不受影响。 */
   const writtenRef = useRef(0);
-  const controllersRef = useRef(new Map<ProofTask, AbortController>());
-  /** 各任务在飞期间发生的编辑：结果回来后按顺序把偏移穿过去。 */
-  const pendingSpansRef = useRef(new Map<ProofTask, EditSpan[]>());
-  /** 每个槽位一条串行队列：两个任务挤在槽 1 时先来后到。 */
-  const slotChainRef = useRef(new Map<number, Promise<void>>());
-  /** 纠错完成后链式触发人设校验用（回调里不能直接引用自己）。 */
-  const runTaskRef = useRef<(task: ProofTask, manual: boolean, windowOverride?: ProofWindow) => void>(() => undefined);
+  const controllerRef = useRef<AbortController | null>(null);
+  /** 请求在飞期间发生的编辑：结果回来后按顺序把偏移穿过去。 */
+  const pendingSpansRef = useRef<EditSpan[]>([]);
 
   const onEdit = useCallback((span: EditSpan) => {
     if (span.changeStart === span.oldEnd && span.delta === 0) return;
@@ -136,56 +109,40 @@ export function useProofreader(args: ProofreaderArgs): Proofreader {
     if (windowStartRef.current !== null) {
       windowStartRef.current = mapOffsetThroughEdit(windowStartRef.current, span);
     }
-    for (const spans of pendingSpansRef.current.values()) spans.push(span);
+    pendingSpansRef.current.push(span);
     setLlmIssues((prev) => (prev.length === 0 ? prev : mapIssuesThroughEdit(prev, span)));
     setLocalIssues((prev) => (prev.length === 0 ? prev : mapIssuesThroughEdit(prev, span)));
   }, []);
 
   const cancel = useCallback(() => {
-    for (const controller of controllersRef.current.values()) controller.abort();
-    controllersRef.current.clear();
+    controllerRef.current?.abort();
+    controllerRef.current = null;
   }, []);
 
-  const runTask = useCallback(
-    (task: ProofTask, manual: boolean, windowOverride?: ProofWindow) => {
-      if (!available || controllersRef.current.has(task)) return;
-      const setTaskStatus = task === "proofread" ? setStatus : setConsistencyStatus;
+  const run = useCallback(
+    (manual: boolean, windowOverride?: ProofWindow) => {
+      if (!available || controllerRef.current) return;
       const text = contentRef.current;
       const win = windowOverride ?? resolveProofWindow(text, caretRef.current, windowStartRef.current, manual);
       if (win.end - win.start < PROOF_MIN_WINDOW) {
-        if (manual) setTaskStatus({ state: "error", message: "光标前面还没有足够的文字可查。" });
+        if (manual) setStatus({ state: "error", message: "光标前面还没有足够的文字可查。" });
         return;
       }
       const windowText = maskChapterMarks(text.slice(win.start, win.end));
 
-      let prompt: string;
-      let grammar: string;
-      let sampling: { temperature: number; topP: number; nPredict: number };
-      let slot: number;
-      if (task === "proofread") {
-        windowStartRef.current = win.start;
-        writtenRef.current = 0;
-        prompt = buildProofreadPrompt(templateRef.current, windowText, noThinkRef.current);
-        grammar = PROOFREAD_GRAMMAR;
-        sampling = PROOFREAD_SAMPLING;
-        slot = PROOFREAD_SLOT;
-      } else {
-        const hits = findMaterialHits(materialsRef.current, text, win.start, win.end).filter((hit) => hit.kind === "character");
-        const cardsText = buildMaterialsText({ ...materialsRef.current, lore: [] }, hits);
-        if (!cardsText) {
-          if (manual) setTaskStatus({ state: "error", message: "这段正文里没有出现任何已建卡的角色。" });
-          return;
-        }
-        prompt = buildConsistencyPrompt(templateRef.current, cardsText, windowText, noThinkRef.current);
-        grammar = CONSISTENCY_GRAMMAR;
-        sampling = CONSISTENCY_SAMPLING;
-        slot = isDemo || slotsRef.current > CONSISTENCY_SLOT ? CONSISTENCY_SLOT : PROOFREAD_SLOT;
+      windowStartRef.current = win.start;
+      writtenRef.current = 0;
+      const prompt = buildProofreadPrompt(templateRef.current, windowText, noThinkRef.current);
+      const slot = PROOFREAD_SLOT;
+      if (!isDemo && slotsRef.current <= slot) {
+        if (manual) setStatus({ state: "error", message: `本地模型只开了 ${slotsRef.current} 个槽位，纠错需要第 ${slot + 1} 个。` });
+        return;
       }
 
       const controller = new AbortController();
-      controllersRef.current.set(task, controller);
-      pendingSpansRef.current.set(task, []);
-      setTaskStatus({ state: "running", chars: windowText.length });
+      controllerRef.current = controller;
+      pendingSpansRef.current = [];
+      setStatus({ state: "running", chars: windowText.length });
       const started = performance.now();
 
       const request = (withGrammar: boolean) =>
@@ -194,16 +151,15 @@ export function useProofreader(args: ProofreaderArgs): Proofreader {
             requestId: crypto.randomUUID(),
             prompt,
             idSlot: slot,
-            nPredict: sampling.nPredict,
-            temperature: sampling.temperature,
-            topP: sampling.topP,
-            grammar: withGrammar ? grammar : undefined,
+            nPredict: PROOFREAD_SAMPLING.nPredict,
+            temperature: PROOFREAD_SAMPLING.temperature,
+            topP: PROOFREAD_SAMPLING.topP,
+            grammar: withGrammar ? PROOFREAD_GRAMMAR : undefined,
           },
           controller.signal,
         );
 
-      const job = async () => {
-        if (controller.signal.aborted) return;
+      void (async () => {
         try {
           let result;
           try {
@@ -215,57 +171,37 @@ export function useProofreader(args: ProofreaderArgs): Proofreader {
           }
           // 撞到 n_predict 上限时最后一行是残的（改法可能只写了一半），丢掉
           const output = result.stopType === "limit" ? result.text.slice(0, result.text.lastIndexOf("\n") + 1) : result.text;
-          const findings = task === "proofread" ? parseFindings(output) : parseConsistencyFindings(output);
-          let fresh = findingsToIssues(findings, windowText, win.start);
+          let fresh = findingsToIssues(parseFindings(output), windowText, win.start);
           let mapped: ProofWindow = win;
-          for (const span of pendingSpansRef.current.get(task) ?? []) {
+          for (const span of pendingSpansRef.current) {
             fresh = mapIssuesThroughEdit(fresh, span);
             mapped = { start: mapOffsetThroughEdit(mapped.start, span), end: mapOffsetThroughEdit(mapped.end, span) };
           }
           const dismissed = dismissedRef.current;
-          setLlmIssues((prev) => mergeLlmIssues(prev, fresh, mapped, dismissed, TASK_KINDS[task]));
-          setTaskStatus({
+          setLlmIssues((prev) => mergeLlmIssues(prev, fresh, mapped, dismissed, PROOFREAD_KINDS));
+          setStatus({
             state: "done",
             at: Date.now(),
             chars: windowText.length,
             ms: performance.now() - started,
             found: fresh.filter((issue) => !dismissed.has(issue.key)).length,
           });
-          // 随纠错一起校验人设：同一窗口（已穿过在飞期间的编辑）
-          if (task === "proofread" && consistencyAutoRef.current) {
-            controllersRef.current.delete(task);
-            pendingSpansRef.current.delete(task);
-            runTaskRef.current("consistency", false, mapped);
-          }
         } catch (err) {
-          if (controller.signal.aborted) setTaskStatus({ state: "idle" });
-          else setTaskStatus({ state: "error", message: errorMessage(err) });
+          if (controller.signal.aborted) setStatus({ state: "idle" });
+          else setStatus({ state: "error", message: errorMessage(err) });
         } finally {
-          if (controllersRef.current.get(task) === controller) controllersRef.current.delete(task);
-          pendingSpansRef.current.delete(task);
+          if (controllerRef.current === controller) controllerRef.current = null;
+          pendingSpansRef.current = [];
         }
-      };
-
-      // 同一槽位上的任务串行；不同槽位并行
-      const chain = slotChainRef.current;
-      const previous = chain.get(slot) ?? Promise.resolve();
-      const next = previous.then(job, job);
-      chain.set(slot, next);
+      })();
     },
     [available, isDemo],
   );
 
-  useLayoutEffect(() => {
-    runTaskRef.current = runTask;
-  }, [runTask]);
-
-  const run = useCallback((manual: boolean) => runTask("proofread", manual), [runTask]);
-  const runConsistency = useCallback((manual: boolean) => runTask("consistency", manual), [runTask]);
-
   // 卸载时中断在飞请求
   useEffect(
     () => () => {
-      for (const controller of controllersRef.current.values()) controller.abort();
+      controllerRef.current?.abort();
     },
     [],
   );
@@ -320,12 +256,9 @@ export function useProofreader(args: ProofreaderArgs): Proofreader {
     issues,
     activeIssue,
     status,
-    consistencyStatus,
     available,
     isDemo,
-    hasCharacters: materials.characters.length > 0,
     run,
-    runConsistency,
     cancel,
     dismiss,
     clearAll,

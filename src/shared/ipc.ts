@@ -186,6 +186,8 @@ export interface BackendConfig {
   port: number
   args: string[]
   startupTimeoutSec: number
+  /** 部署时选的引擎类型。老配置没有这一项：界面就只写「当前引擎」，不猜型号。 */
+  kind?: BackendKind
 }
 
 export type SetupProblem = 'missing-config' | 'invalid-config' | 'missing-backend' | 'missing-model'
@@ -325,8 +327,12 @@ export interface IpcInvokeMap {
   /** 整体替换 backend.json 并重启后端（首页「模型与推理」面板用）。 */
   'setup:apply-config': (config: BackendConfig) => void
   'setup:deploy': (config: DeployConfig) => void
+  /** 换引擎：只补下载引擎包（模型原样复用），重启后端并返回新配置。 */
+  'setup:switch-engine': (kind: BackendKind) => BackendConfig
   'dialog:choose-path': (options: ChoosePathOptions) => string | null
   'backend:get-status': () => BackendStatus
+  /** 与 get-status 同源，但保留 message（向导要把失败原因说清楚）。 */
+  'backend:get-detail': () => BackendStatus
   'backend:get-progress': () => BackendProgress
   'backend:restart': () => void
   'backend:open-log': () => void
@@ -336,6 +342,12 @@ export interface IpcInvokeMap {
    * renderer 拿到后用 canvas 量宽逐个验证，只有真正装了的才会进「字体」下拉。
    */
   'fonts:list': (force?: boolean) => string[]
+  'app:version': () => string
+  'update:check': () => UpdateInfo
+  /** 下载安装包到 userData/update/，resolve 落盘路径；镜像全失败则 reject（降级为只提示）。 */
+  'update:download': (info: UpdateInfo) => string
+  /** 静默跑 NSIS 安装包并退出自己。 */
+  'update:install': (exePath: string) => void
   'candidates:get': (request: CandidateRequest) => Candidate[]
   /** 通用一次性补全（纠错 / 人设校验等后台任务）：prompt 已按模板拼好，原样转发。 */
   'llm:complete': (request: CompletionRequest) => CompletionResult
@@ -373,12 +385,37 @@ export interface IpcSendMap {
   'app:flush-done': []
 }
 
+/** 检查更新的结果（主进程读 GitHub Release 得到）。 */
+export interface UpdateInfo {
+  /** 打包环境才支持更新；浏览器演示 / 开发模式为 false。 */
+  supported: boolean
+  currentVersion: string
+  available: boolean
+  /** 远端最新版本号（去掉 v 前缀）。 */
+  latest?: string
+  /** release 正文摘要。 */
+  notes?: string
+  assetSize?: number
+  /** 安装包直链（GitHub asset 地址；下载时按镜像顺序尝试）。 */
+  url?: string
+  /** 检查失败 / 不支持的原因（UI 用来提示）。 */
+  reason?: string
+}
+
+export interface UpdateProgress {
+  received: number
+  total: number
+  /** 当前试到第几个源（0 = 官方直链顺序里的第一个）。 */
+  source: number
+}
+
 /** main → renderer 推送（webContents.send / ipcRenderer.on）。 */
 export interface IpcPushMap {
   'expand:chunk': ExpandChunk
   'backend:status': BackendStatus
   'backend:progress': BackendProgress
   'setup:progress': DownloadProgress
+  'update:progress': UpdateProgress
   'app:flush': undefined
 }
 

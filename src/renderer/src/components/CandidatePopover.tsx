@@ -24,13 +24,17 @@ interface CandidatePopoverProps {
   totalCount: number;
   faded: boolean;
   prefillChars: number;
-  peekKeyLabel: string;
+  /** 长按它隐藏浮窗（空串 = 没绑定）。 */
+  hideKeyLabel: string;
+  /** 长按它把候选展开成短句（空串 = 没绑定 / 与隐藏键同一个）。 */
+  expandKeyLabel: string;
+  /** 按它随机取词（空串 = 没绑定）。 */
   sampleKeyLabel: string;
   /** 与 visible 对齐：该行已展开的短句（null = 还是词）。 */
   expansions: Array<ExpansionRow | null>;
   /** 正在逐行展开（标题栏提示）。 */
   expanding: boolean;
-  /** 长按取样键可展开（页脚提示；关闭功能或没有取样键时为 false）。 */
+  /** 长按展开键可展开（页脚提示；关闭功能或没有绑定键时为 false）。 */
   expandHint: boolean;
   onHover: (index: number) => void;
   onPick: (index: number) => void;
@@ -62,7 +66,8 @@ export const CandidatePopover = forwardRef<CandidatePopoverHandle, CandidatePopo
     totalCount,
     faded,
     prefillChars,
-    peekKeyLabel,
+    hideKeyLabel,
+    expandKeyLabel,
     sampleKeyLabel,
     expansions,
     expanding,
@@ -212,21 +217,31 @@ export const CandidatePopover = forwardRef<CandidatePopoverHandle, CandidatePopo
 
         <div className="candidate-footer">
           <span>
+            <kbd>1</kbd>…<kbd>9</kbd> 插入
+          </span>
+          <span>
             <kbd>↑</kbd>
             <kbd>↓</kbd> 选择
           </span>
-          {sampleKeyLabel && (
-            <span>
-              <kbd>{sampleKeyLabel}</kbd> 随机{expandHint ? " · 长按展开" : ""}
-            </span>
-          )}
           <span>
             <kbd>PgUp</kbd>
             <kbd>PgDn</kbd> 翻页
           </span>
-          <span>
-            <kbd>{peekKeyLabel}</kbd> 长按穿透
-          </span>
+          {expandHint && expandKeyLabel && (
+            <span>
+              长按 <kbd>{expandKeyLabel}</kbd> 展开短句
+            </span>
+          )}
+          {sampleKeyLabel && (
+            <span>
+              <kbd>{sampleKeyLabel}</kbd> 随机
+            </span>
+          )}
+          {hideKeyLabel && (
+            <span>
+              长按 <kbd>{hideKeyLabel}</kbd> 隐藏
+            </span>
+          )}
         </div>
       </div>
 

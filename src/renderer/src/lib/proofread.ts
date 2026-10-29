@@ -1,7 +1,7 @@
 /**
  * 纠错（LLM 层）：窗口选择、提示词与 GBNF 文法、输出解析、引用定位、问题随编辑平移。
  *
- * 设计要点（见 plan.md §2.3）：
+ * 设计要点：
  *   - 检查范围是「整个窗口」(4~6k 字)，起点固定、终点跟着光标段落走，这样 cache_prompt 能命中前缀；
  *     窗口超过上限时起点向前跳到 end - 4000 附近的段首。
  *   - 模型输出被文法锁成行格式：
@@ -10,7 +10,10 @@
  *       无
  *   - 引用定位：精确 → 去标点规范化 → ≥ 8 字最长公共子串 → 放弃。
  *   - 问题只存在内存里，随编辑用 EditSpan 平移；被改动波及的直接丢弃（作者多半已经改了）。
- *   - 人设校验（plan.md §2.4）走同一条管线：只换提示词 / 文法 / 行格式（角色名|引用|冲突项），结果 kind = consistency。
+ *
+ * ★ 人设校验（角色卡 × 正文找矛盾）已于 2026-10-25 删除：小模型做不稳，误报漏报都高。
+ *   人物与设定从此不与模型交互，只保留 lib/materials.ts 的正则统计（命中展示 / 提及次数 / 建卡候选名）
+ *   与 lib/monotony.ts 的专名变体提示。
  */
 import type { PromptTemplate } from "./types";
 import type { EditSpan } from "./editorText";
@@ -19,7 +22,7 @@ import { isChapterMarkLine } from "./chapters";
 
 /* ════════════════════════════ 类型 ════════════════════════════ */
 
-export type IssueKind = "grammar" | "monotony" | "consistency" | "local";
+export type IssueKind = "grammar" | "monotony" | "local";
 
 export interface IssueRange {
   start: number;
@@ -44,7 +47,6 @@ export interface Issue {
 export const ISSUE_KIND_LABEL: Record<IssueKind, string> = {
   grammar: "语病",
   monotony: "单调",
-  consistency: "人设",
   local: "重复",
 };
 
@@ -157,64 +159,13 @@ nchar ::= [^|\\n]
 
 export const PROOFREAD_SAMPLING = { temperature: 0.2, topP: 0.9, nPredict: 400 } as const;
 
-/* ── 人设一致性校验：同一管线，只换提示词与行格式 ── */
-
-export const CONSISTENCY_MAX_LINES = 6;
-
-const SYSTEM_CONSISTENCY = `你是小说的设定编辑。下面给出几位角色的设定卡和一段正文。只找正文与设定卡**明确矛盾**的地方（外观、身份、关系、能力、已经发生过的事实等），严格按行格式输出：
-角色名|原文引用|冲突项
-引用必须是正文里连续的一段（10～40 字），一字不差；冲突项不超过 30 字，写清设定里是怎么说的。
-每行一个问题，最多 ${CONSISTENCY_MAX_LINES} 行，只报有把握的矛盾；正文没有提到的设定不算矛盾。没有矛盾就只输出一个字：无
-不要解释，不要输出格式之外的任何文字。`;
-
-/** cardsText 只放窗口里命中的角色卡（materials.buildMaterialsText），正文与纠错用同一个窗口。 */
-export function buildConsistencyPrompt(template: PromptTemplate, cardsText: string, windowText: string, noThinkPrefix = ""): string {
-  return (
-    template.systemOpen +
-    SYSTEM_CONSISTENCY +
-    template.systemClose +
-    template.userOpen +
-    `设定卡：\n${cardsText.trim()}\n\n正文：\n${windowText.trimEnd()}\n\n请按格式输出。` +
-    template.userClose +
-    template.assistantOpen +
-    noThinkPrefix
-  );
-}
-
-export const CONSISTENCY_GRAMMAR = `root ::= "无" | line+
-line ::= name "|" quote "|" note "\n"
-name ::= nchar{1,12}
-quote ::= qchar{6,60}
-note ::= nchar{1,40}
-qchar ::= [^|‖\n]
-nchar ::= [^|\n]
-`;
-
-export const CONSISTENCY_SAMPLING = { temperature: 0.2, topP: 0.9, nPredict: 320 } as const;
-
 /* ════════════════════════════ 解析 ════════════════════════════ */
 
 export interface Finding {
-  kind: "grammar" | "monotony" | "consistency";
+  kind: "grammar" | "monotony";
   quotes: string[];
   message: string;
   suggestion?: string;
-}
-
-/** 人设校验的行格式：角色名|引用|冲突项。 */
-export function parseConsistencyFindings(output: string): Finding[] {
-  const findings: Finding[] = [];
-  const body = output.replace(/<think>[\s\S]*?(<\/think>|$)/g, "");
-  for (const rawLine of body.split("\n")) {
-    const line = rawLine.replace(/｜/g, "|").trim();
-    if (!line || line === "无") continue;
-    const parts = line.split("|").map((p) => p.trim());
-    if (parts.length < 3 || !parts[1] || !parts[2]) continue;
-    const name = parts[0].slice(0, 12);
-    findings.push({ kind: "consistency", quotes: [parts[1]], message: name ? `${name}：${parts[2]}` : parts[2] });
-    if (findings.length >= CONSISTENCY_MAX_LINES) break;
-  }
-  return findings;
 }
 
 /** 容错解析：接受全角竖线、多余空白、缺少末尾竖线；格式不对的行直接跳过。 */
@@ -381,7 +332,7 @@ export function findingsToIssues(findings: Finding[], windowText: string, window
   const seen = new Set<string>();
   for (const finding of findings) {
     let ranges: IssueRange[] = [];
-    if (finding.kind === "grammar" || finding.kind === "consistency") {
+    if (finding.kind === "grammar") {
       const range = locator.locate(finding.quotes[0]);
       if (range) ranges = [range];
     } else if (finding.quotes.length === 1) {

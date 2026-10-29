@@ -11,7 +11,12 @@ import { useEffect, useState } from "react";
 import { BackendSettingsPanel } from "./components/BackendSettingsPanel";
 import { Icon } from "./components/Icon";
 import { LibraryHome, type ImportReport } from "./components/LibraryHome";
+import { OnboardingFlow } from "./components/OnboardingFlow";
+import { markOnboarded, shouldShowOnboarding } from "./components/onboardingState";
+import { UpdateDialog } from "./components/UpdateDialog";
 import { chooseCandidateSource } from "./lib/candidateProvider";
+import { platform } from "./lib/platform";
+import { useUpdater } from "./lib/useUpdater";
 import { useBackendStatus } from "./lib/useBackendStatus";
 import { chooseLibraryProvider, emptyDocument, sortLibrary } from "./lib/library";
 import { MAX_FILE_BYTES, parseOpenedFile } from "./lib/openFile";
@@ -70,6 +75,22 @@ export default function App({ onRunSetupWizard }: AppProps) {
   const [active, setActive] = useState<ActiveManuscript | null>(null);
   const [homeLogText, setHomeLogText] = useState<string | null>(null);
   const [backendSettingsOpen, setBackendSettingsOpen] = useState(false);
+  // 新手引导：首次进入弹一次（每步都能跳过）；设置「基本」页可重看。
+  const [onboardingOpen, setOnboardingOpen] = useState(shouldShowOnboarding);
+
+  // 检查更新：启动 10 秒后自动查一次（有新版本才弹，每版本只提示一次）；
+  // 手动入口在设置「基本」页的「关于与更新」，任何时候都给明确结果。
+  const updater = useUpdater();
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const { check: checkUpdate } = updater;
+  useEffect(() => {
+    if (!platform.api) return;
+    void platform.api.appVersion().then(setAppVersion).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    const timer = setTimeout(() => checkUpdate(false), 10_000);
+    return () => clearTimeout(timer);
+  }, [checkUpdate]);
 
   // 首页也要显示模型加载进度；与编辑器共用同一份缓存，切页不会重新从 0% 开始。
   const backend = useBackendStatus(candidateSource.isDemo);
@@ -227,8 +248,9 @@ export default function App({ onRunSetupWizard }: AppProps) {
       eosThreshold: defaults.eosThreshold,
       prefillHintSeconds: defaults.prefillHintSeconds,
       fadeOpacity: defaults.fadeOpacity,
-      peekKey: defaults.peekKey,
-      peekHoldMs: defaults.peekHoldMs,
+      hideKey: defaults.hideKey,
+      holdMs: defaults.holdMs,
+      expandKey: defaults.expandKey,
       sampleKey: defaults.sampleKey,
     }));
   }
@@ -304,7 +326,25 @@ export default function App({ onRunSetupWizard }: AppProps) {
         onSettingsChange={changeSetting}
         onResetAdvanced={resetAdvanced}
         onOpenBackendSettings={candidateSource.isDemo ? undefined : () => setBackendSettingsOpen(true)}
+        appVersion={appVersion}
+        updateBusy={updater.phase === "checking" || updater.phase === "downloading" || updater.phase === "installing"}
+        onCheckUpdate={() => checkUpdate(true)}
+        onReplayOnboarding={() => setOnboardingOpen(true)}
       />
+
+      {onboardingOpen && (
+        <OnboardingFlow
+          settings={settings}
+          onSettingsChange={changeSetting}
+          onFinish={(action) => {
+            markOnboarded();
+            setOnboardingOpen(false);
+            if (action === "create") void createManuscript();
+          }}
+        />
+      )}
+
+      <UpdateDialog updater={updater} />
 
       {backendSettingsOpen && (
         <BackendSettingsPanel
