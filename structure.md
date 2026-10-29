@@ -15,13 +15,13 @@
 
 约束解码不会增加能力，只是在合法 token 里重新分配概率；一旦合法集合排除了模型的自然首 token，决定权就落在剩下的"边角料"上。单 token 的逃生口（「无」）与多 token 的实质回答（`A|…`）竞争本就不公平。
 
-**修复**（已生效，验证正常）：`ModelProfile.noThinkPrefix`（`shared/modelProfile.ts`，模板含 `<think>` 或模型名为 Qwen3.5 时 = 空思考块），指令类任务的 prompt 接在 `template.assistantOpen` 之后（`lib/proofread.ts` `buildProofreadPrompt`）；`main/llm.ts` dev 日志打印模型原话前 200 字，方便再次核对。
+**修复**（已生效，验证正常）：`ModelProfile.noThinkPrefix`（`shared/modelProfile.ts`，模板含 `<think>` 或模型名为 Qwen3.5 时 = 空思考块 `NO_THINK_PREFIX`），三条链路的 assistant 回合一律是 `template.assistantOpen + noThinkPrefix + …`（续写 `promptBuilder.assemble`、纠错 `proofread.buildProofreadPrompt`、短句展开复用续写 prompt）；`main/llm.ts` dev 日志打印模型原话前 200 字，方便再次核对。
 
 **对今后微调 / 提示词工作的硬性要求**：
 1. 训练样本的回合格式必须与运行时**逐字节一致**（含空思考块、`正文：` 等前导文本、`assistantOpen` 之后的内容），否则首 token 分布偏移，文法会把偏移放大成坍缩。
 2. 任何"模型总是回同一个短答案"的问题，先看 `predicted_n` 与原话，再怀疑模型能力。
 3. 文法里不要给单 token 逃生口不设代价：要么微调时平衡「无」样本比例，要么让格式先写一行非平凡内容（如「概览：…」）再逐条列出。
-4. 候选续写（`promptBuilder.buildPrompt`）是续写式用法，assistant 回合直接接正文，不加空思考块；这是有意的区别，不要"统一"掉。
+4. 候选续写与纠错**已经统一**（2026-10-25）：续写的 assistant 回合也是 `noThinkPrefix + 大纲块 + 正文：\n + body`。此前「续写有意不加思考块」的决定作废——底模在 `enable_thinking=false` 时的分布本来就带这个前缀，而 SFT 样本要能用一套拼法同时覆盖续写与指令任务。改任何一条链路的回合开头，三条一起改，并用 `npm run probe` 核对字面量。
 
 ---
 
@@ -54,34 +54,34 @@ PickWord/
 │
 └── src/
     ├── shared/               # 两个进程共用：类型 + 纯函数（不碰 electron / DOM）
-    │   ├── ipc.ts            # 全部 IPC 载荷 + IpcInvokeMap / IpcSendMap / IpcPushMap 通道清单（308 行）
-    │   ├── materials.ts      # 角色卡 / 设定条目类型、parseMaterials / parseChapterOutlines 宽松解析（138 行）
-    │   ├── modelProfile.ts   # ModelProfile、PromptTemplate（chatml / gemma / llama3）、EOS / 隐藏标记默认表（101 行）
-    │   ├── backendArgs.ts    # llama-server 参数表的读写 / 拆装（-c -t --device 等）、默认端口与上下文（112 行）
+    │   ├── ipc.ts            # 全部 IPC 载荷 + IpcInvokeMap / IpcSendMap / IpcPushMap 通道清单（393 行）
+    │   ├── materials.ts      # 角色卡 / 设定条目类型、parseMaterials / parseChapterOutlines 宽松解析（158 行）
+    │   ├── modelProfile.ts   # ModelProfile、PromptTemplate（chatml / gemma / llama3）、EOS / 隐藏标记默认表、NO_THINK_PREFIX 与 detectNoThinkPrefix（131 行）
+    │   ├── backendArgs.ts    # llama-server 参数表的读写 / 拆装（-c -t --device 等）、默认端口与上下文（127 行）
     │   └── text.ts           # countChars / makeExcerpt / safeFileName / REBUILD_HINT_CHARS（27 行）
     │
     ├── main/                 # Electron 主进程
-    │   ├── index.ts          # 窗口、类型化 handle/on 注册、关窗保护、choosePath 对话框（232 行）
-    │   ├── backendConfig.ts  # backend.json 的唯一读写者：路径、宽松解析、校验、原子写、update(fn)（167 行）
+    │   ├── index.ts          # 窗口、类型化 handle/on 注册、关窗保护、choosePath 对话框（283 行）
+    │   ├── backendConfig.ts  # backend.json 的唯一读写者：路径、宽松解析、校验、原子写、update(fn)（179 行）
     │   ├── setup.ts          # getSetupState()：配置是否可用、是否缺 --device（70 行）
     │   ├── catalog.ts        # 下载清单：llama.cpp tag、镜像列表、引擎资产、MODEL_PRESETS、默认目录（102 行）
-    │   ├── backend.ts        # LlamaBackend：拉起 / 停止 / 重启 llama-server，日志隐私，状态广播（262 行）
+    │   ├── backend.ts        # LlamaBackend：拉起 / 停止 / 重启 llama-server，日志隐私，状态广播（267 行）
     │   ├── loadProgress.ts   # LoadProgressTracker：PHASE_MARKERS → fraction，历史耗时平滑 + ETA（120 行）
     │   ├── devices.ts        # llama-server --list-devices 解析（83 行）
-    │   ├── candidates.ts     # 转发 /completion（槽 0），按 ModelProfile 标记 isEos、过滤隐藏标记；/props → ModelProfile（含 slots）（335 行）
-    │   ├── llm.ts            # 通用一次性补全 llm:complete（槽 1 起，GBNF 文法、取消、槽位数校验）—— 纠错 / 校验共用（127 行）
-    │   ├── expand.ts         # 短句展开 expand:start（槽 0、stream: true、chunk 经 expand:chunk 推送、取消）（120 行）
+    │   ├── candidates.ts     # 转发 /completion（槽 0），按 ModelProfile 标记 isEos、过滤隐藏标记；/props → ModelProfile（含 slots）（340 行）
+    │   ├── llm.ts            # 通用一次性补全 llm:complete（槽 1 起，GBNF 文法、取消、槽位数校验）—— 纠错专用（133 行）
+    │   ├── expand.ts         # 短句展开 expand:start（槽 0、stream: true、chunk 经 expand:chunk 推送、取消）（114 行）
     │   ├── sse.ts            # llama-server SSE 流解析 readSseStream（不依赖 electron，可直接冒烟）
     │   ├── hardware.ts       # CPU / GPU / 显存检测与后端推荐（PowerShell、WMI、nvidia-smi）（611 行）
-    │   ├── deploy.ts         # 部署流程：parseDeployConfig、多镜像下载、解压、写 backend.json（260 行）
+    │   ├── deploy.ts         # 部署流程：parseDeployConfig、多镜像下载、解压、写 backend.json（263 行）
     │   ├── downloader.ts     # 断点续传下载、PowerShell 解压（参数数组，不拼命令行）、进度广播（345 行）
     │   ├── library.ts        # 文库：短篇 txt + 旁车 v5；长篇 = 子目录 + book.json + 多卷；书级操作；目录迁移
     │   ├── fonts.ts          # 系统字体名清单 fonts:list：GDI+ 字体族名 + 注册表字体表（清洗、去重、进程内缓存、非 Windows 返回空）
     │   ├── documents.ts      # 「导出 TXT 副本」（55 行）
-    │   └── ioUtils.ts        # 类型守卫、原子写、串行队列、文稿校验（127 行）
+    │   └── ioUtils.ts        # 类型守卫、原子写、串行队列、文稿校验（128 行）
     │
     ├── preload/
-    │   ├── index.ts          # 类型化 invoke/send/on 封装 + contextBridge 暴露 api；`WriterApi = typeof api`（129 行）
+    │   ├── index.ts          # 类型化 invoke/send/on 封装 + contextBridge 暴露 api；`WriterApi = typeof api`（144 行）
     │   └── index.d.ts        # 全局 `Window.api?: WriterApi` 声明（renderer 的 tsconfig 包含它）
     │
     └── renderer/
@@ -90,55 +90,55 @@ PickWord/
         └── src/
             ├── main.tsx            # 入口：渲染 <Bootstrap />
             ├── Bootstrap.tsx       # 启动门控 + 关窗 flush 桥接（99 行）
-            ├── App.tsx             # 文库入口，持有设置与文稿列表，书级操作转发 provider，挂「模型与推理」面板（331 行）
+            ├── App.tsx             # 文库入口，持有设置与文稿列表，书级操作转发 provider，挂「模型与推理」面板（343 行）
             ├── WritingEditor.tsx   # 单卷编辑器（1928 行，A–J 十段）：章节栏 / 工作台 / 右键菜单在此装配
             ├── index.css           # 只负责 @import 五个样式文件
             │
             ├── components/
             │   ├── setup/
-            │   │   ├── SetupWizard.tsx     # 向导编排：步骤 / 表单状态 / 调 preload（312 行）
+            │   │   ├── SetupWizard.tsx     # 向导编排：步骤 / 表单状态 / 调 preload（368 行）
             │   │   ├── steps/              # HardwareStep / EngineModelStep / DeployStep / DeviceStep（纯展示）
             │   │   ├── DevicePicker.tsx    # --list-devices 单选列表（向导与面板共用）
             │   │   ├── setupShared.tsx     # SetupFrame / StatusNote / PathField 小组件
             │   │   ├── setupUtils.ts       # formatBytes / errorText / defaultDeviceId / BACKEND_KIND_LABEL
             │   │   └── engineModelForm.ts  # EngineModelForm 类型 + 校验
-            │   ├── BackendSettingsPanel.tsx# 首页「模型与推理」弹窗：编辑 backend.json 结构化字段（226 行）
-            │   ├── LibraryHome.tsx     # 文库首页：短篇 / 长篇卡片（groupEntries）、导入、改名、新建长篇、卷菜单、删除（776 行）
-            │   ├── SettingsPanel.tsx   # 设置面板：基本页 + 高级页（483 行）
+            │   ├── BackendSettingsPanel.tsx# 首页「模型与推理」弹窗：编辑 backend.json 结构化字段（248 行）
+            │   ├── LibraryHome.tsx     # 文库首页：短篇 / 长篇卡片（groupEntries）、导入、改名、新建长篇、卷菜单、删除（779 行）
+            │   ├── SettingsPanel.tsx   # 设置面板：基本页（含算力档位、两个长按键绑定）+ 高级页（585 行）
             │   ├── FontPicker.tsx      # 顶栏的两个下拉控件：FontPicker（字体）与 FontSizePicker（字号）
             │   ├── ChapterPanel.tsx    # 左侧目录栏：长篇时卷列表（切换 / 新建，先保存再切）+ 本卷章节（跳转 / 双击或右键改名 / 取消分章 / 插入）
             │   ├── ContextMenu.tsx     # 右键菜单（portal 到 .app-root：侧栏的 transform 会困住 fixed 元素；定位 / Esc / 外点关闭）
             │   ├── ChapterTitleField.tsx # 纸面「本章」标题草稿框：聚焦时 `editableChapterTitle` 补一个空格、只选中「第N章 」之后的部分；失焦 / 回车才回写标记行
             │   ├── workbench/          # 右侧工作台：44px 图标栏 + 380px 单面板
             │   │   ├── tabs.ts         # WorkbenchTab / WORKBENCH_TABS（上下文 / 大纲 / 角色 / 设定 / 纠错）
-            │   │   ├── Workbench.tsx   # WorkbenchRail + WorkbenchPanel（按 tab 分发）（162 行）
-            │   │   ├── shared.tsx      # Switch / Block / FieldArea / AliasField / ListToolbar / CardShell
-            │   │   ├── ContextTab.tsx  # 风格 / 「注入大纲段」总开关、光标所在段摘要、本次注入的卡片清单
+            │   │   ├── Workbench.tsx   # WorkbenchRail + WorkbenchPanel（按 tab 分发）（181 行）
+            │   │   ├── shared.tsx      # Switch / Block / FieldArea / AliasField（纵向一行一个）/ ListToolbar / CardShell / CardDrag（整卡拖动排序，无额外拖动按钮）（249 行）
+            │   │   ├── ContextTab.tsx  # 风格 / 「注入大纲段」总开关、光标所在段摘要、本窗口出现的卡片（纯展示，不进提示词）（147 行）
             │   │   ├── OutlineTab.tsx  # 总纲（备忘，不送模型）+ 本章大纲段卡片（章首段固定；其余可 移到光标处 / 并入上一段 / 删除；单段注入开关；全部 N 章折叠视图）
-            │   │   ├── CharactersTab.tsx # 角色卡：主要 / 次要分组、四固定字段 + 自定义字段、本地提取候选名（192 行）
-            │   │   ├── LoreTab.tsx     # 设定：地点 / 组织 / 物品 / 其他（123 行）
+            │   │   ├── CharactersTab.tsx # 角色卡：主要 / 次要分组、四固定字段 + 「添加自定义属性」、拖动排序、本地提取候选名（230 行）
+            │   │   ├── LoreTab.tsx     # 设定：地点 / 组织 / 物品 / 其他、拖动排序（124 行）
             │   │   └── ProofreadTab.tsx # 纠错：检查按钮 / 自动检查 / 本地提示开关、状态行、问题卡片（采纳 / 定位 / 忽略）（165 行）
-            │   ├── CandidatePopover.tsx# 候选浮层：自带光标镜像测量与定位（211 行）
+            │   ├── CandidatePopover.tsx# 候选浮层：自带光标镜像测量与定位、数字键插入 / 长按隐藏 / 长按展开的页脚提示（244 行）
             │   ├── SearchPanel.tsx     # 查找替换（127 行）
-            │   ├── BackendStatusBar.tsx# 模型状态条（60 行）
+            │   ├── BackendStatusBar.tsx# 模型状态条（65 行）
             │   ├── GentleToast.tsx     # EOS 弱提醒
             │   ├── BrandLogo.tsx / Icon.tsx
             │
             ├── lib/
             │   ├── platform.ts         # 唯一碰 window.api 的地方：platform.isElectron / platform.api / requireApi()
-            │   ├── types.ts            # re-export shared 类型 + renderer 专有 UI 类型；WriterApi 取自 Window["api"]（77 行）
-            │   ├── promptBuilder.ts    # 四种模式拼接、「人物与设定」注入、段起点 / 滑窗、硬上限；正文经 stripChapterMarks（标记行整行删除）
+            │   ├── types.ts            # re-export shared 类型 + renderer 专有 UI 类型；WriterApi 取自 Window["api"]（94 行）
+            │   ├── promptBuilder.ts    # 四种模式拼接（assistant = 空思考块 + 大纲 + 正文）、段起点 / 滑窗、硬上限、bodyChars；正文经 stripChapterMarks（标记行整行删除）（432 行）
             │   ├── outline.ts          # 大纲段：layoutOutline（按章归类、章首段判定、区间）/ segmentAt / segmentInjects / createSegment / mapSegmentsThroughEdit / remapSegments / migrateLegacyOutline
             │   ├── chapters.ts         # 章节标记 `--标题--`：parseChapters / chapterAt / insert / rename / remove / strip（整行删）/ editableChapterTitle；「第N章」自动顺延 renumberChapters；VolumeSummary
-            │   ├── materials.ts        # 命中检测 findMaterialHits、注入文本 buildMaterialsText、本地人名提取 extractCandidateNames（243 行）
+            │   ├── materials.ts        # 纯脚本素材层（不调模型、不进提示词）：窗口命中 findMaterialHits、提及计数 countMentions、本地人名提取 extractCandidateNames、卡片工厂（179 行）
             │   ├── decorations.ts      # 高亮层装饰：Decoration{anchor|band|wavy, tone, active, label} + splitByDecorations
-            │   ├── proofread.ts        # 纠错核心（纯函数）：窗口选择、提示词 + GBNF 文法、行格式解析、QuoteLocator 三级定位、Issue 随 EditSpan 平移、合并（396 行）
+            │   ├── proofread.ts        # 纠错核心（纯函数）：窗口选择、提示词 + GBNF 文法、行格式解析、QuoteLocator 三级定位、Issue 随 EditSpan 平移、合并（429 行）
             │   ├── monotony.ts         # 本地单调提示：1500 字内重复的 ≥4 字片段（人名 / 停用组合除外）、连续 ≥3 段同样开头、专名写法不一致
-            │   ├── completion.ts       # 通用补全数据源（IPC / 演示 mock），纠错等后台任务共用（72 行）
-            │   ├── expansion.ts        # 短句展开数据源（IPC 流 / 演示逐字 mock）、停止符 `，。！？；…\n`、采样参数、finalizeExpansion（补回句尾标点）
+            │   ├── completion.ts       # 通用补全数据源（IPC / 演示 mock），纠错等后台任务共用（82 行）
+            │   ├── expansion.ts        # 短句展开数据源（IPC 流 / 演示逐字 mock）、停止符 `，。！？；…\n`、THINK_MARK 截断、采样参数、finalizeExpansion（补回句尾标点）（95 行）
             │   ├── useExpander.ts      # 展开编排 hook：按候选全局序号存 rows、串行逐行解码、cancel 保留半句 / clear 清空
-            │   ├── useProofreader.ts   # 纠错 + 人设校验编排 hook：手动 / 自动触发、每槽串行队列、在飞期间的编辑回放、本地提示防抖、忽略 / 清除
-            │   ├── candidateProvider.ts# 数据源切换（IPC / mock）、概率软化、随机取词（319 行）
+            │   ├── useProofreader.ts   # 纠错编排 hook（单任务、固定槽 1）：手动 / 自动触发、在飞期间的编辑回放、本地提示防抖、忽略 / 清除（283 行）
+            │   ├── candidateProvider.ts# 数据源切换（IPC / mock）、概率软化（301 行）
             │   ├── candidateScheduler.ts# 防抖 + 单飞 + 最新优先的候选请求调度（93 行）
             │   ├── candidatePostprocess.ts# 排序 → 软化 → EOS 判定 → 过滤 → 多样化（纯函数，48 行）
             │   ├── candidateDiversity.ts# 候选多样化重排（369 行）
@@ -146,8 +146,8 @@ PickWord/
             │   ├── useEditHistory.ts   # 撤销 / 重做：差异帧栈（只存改动区间，850 ms 合并、400 帧上限）（146 行）
             │   ├── flushRegistry.ts    # 关窗落盘单点注册：registerFlusher / installFlushBridge（45 行）
             │   ├── editorText.ts       # 光标像素测量（CaretLayoutCache 复用镜像）、查找、Anchor 跨编辑映射（大纲段起点复用）
-            │   ├── library.ts          # LibraryProvider 接口（含 5 个书级操作）、localStorage 演示实现、emptyDocument、排序（485 行）
-            │   ├── settings.ts         # SettingsValues、默认值、SETTING_LIMITS（sanitize / 面板滑杆 / 顶栏下拉共用）+ numericOptions
+            │   ├── library.ts          # LibraryProvider 接口（含 5 个书级操作）、localStorage 演示实现、emptyDocument、排序（487 行）
+            │   ├── settings.ts         # SettingsValues、默认值、SETTING_LIMITS（sanitize / 面板滑杆 / 顶栏下拉共用）+ numericOptions；长按键体系 HoldKey / HOLD_KEY_LABEL / matchesHoldKey / holdKeyChar；算力档位 detectTier（329 行）
             │   ├── openFile.ts         # txt/md/docx 字节 → 纯文本（UTF-8 / GB18030、自实现 zip）（246 行）
             │   ├── useBackendStatus.ts # 模型状态 / 进度 / ModelProfile 订阅（useSyncExternalStore）（148 行）
             │   ├── fonts.ts            # 本机中文字体探测（canvas 逐像素签名验证 + 三处名字来源）与字体栈拼接；候选名单只是探测输入，列表永远由当前机器量出来
@@ -232,7 +232,7 @@ checking ──► setup        （未配置 / 配置损坏 / 文件丢失 → �
 
 ### 4. WritingEditor 组件
 
-编辑器仍是最大的组件（1928 行），按 **A–J 十段**用注释分隔，但以下关注点已抽成独立模块：
+编辑器仍是最大的组件（2256 行），按 **A–J 十段**用注释分隔，但以下关注点已抽成独立模块：
 
 | 关注点 | 模块 | 编辑器里剩下什么 |
 |------|------|------|
@@ -244,9 +244,9 @@ checking ──► setup        （未配置 / 配置损坏 / 文件丢失 → �
 | 浮层定位 | `CandidatePopover` 自带镜像 div；`popoverRef.current?.relayout()` 在滚动时调用 | — |
 | 章节 | `lib/chapters.ts`（`parseChapters` 纯函数，useMemo 于 content） | 当前章 = `chapterAt(index, caret)`；分章 / 重编号 / 改名 / 取消分章都把精确偏移映射传给 `setEditorDocument(…, mapOffset)`，大纲段起点随之平移 |
 | 大纲段 | `lib/outline.ts` | `outlineLayout = layoutOutline(content, chapterIndex, context.outlineSegments)`（单槽缓存，段数组必须不可变替换）；`currentSegment = segmentAt(…, caret)`；`segmentInjecting = segmentInjects(current, caret, outlineEnabled)`；操作：`addSegmentAtCaret`（右键 / 面板）/ `setSegmentText`（空章首卡写字才建段）/ `setSegmentInject` / `moveSegmentToCaret` / `removeSegment(merge)` / `locateSegment`；`outlineFocusKey` 让面板聚焦并闪一下某张卡 |
-| 人物 / 设定注入 | `lib/materials.ts` | `hits = findMaterialHits(materials, content, bodyStart, caret)` → `buildMaterialsText` 进 `promptArgsFor` |
+| 人物 / 设定（**不进提示词**） | `lib/materials.ts` | `hits = useMemo(() => findMaterialHits(materials, content, promptPreview.bodyStart, promptPreview.bodyEnd))`：纯派生值，只喂面板展示与本地统计；`promptArgsFor` 里没有素材 |
 | 高亮层 | `lib/decorations.ts` | `decorations` useMemo（每个大纲段起点一条横线 + 「大纲 i/n」标签，tone manual = 当前且注入中 / chapter = 当前未注入 / idle；纠错的 wavy / band，光标所在处 `data-active`）→ `splitByDecorations` 渲染到 textarea 下方的镜像层 |
-| 纠错 / 人设校验 | `lib/useProofreader.ts` | `proofreader = useProofreader({content, caret, template, noThinkPrefix, backendReady, slots, auto, local, consistencyAuto, materials, ignoreNames})`；`setEditorDocument` 每次改动调 `proofreader.onEdit(span)`；采纳 = `applyProgrammaticEdit`（被改到的问题自动消失） |
+| 纠错 | `lib/useProofreader.ts` | `proofreader = useProofreader({content, caret, template, noThinkPrefix, backendReady, slots, auto, local, ignoreNames})`；`setEditorDocument` 每次改动调 `proofreader.onEdit(span)`；采纳 = `applyProgrammaticEdit`（被改到的问题自动消失） |
 | 短句展开 | `lib/useExpander.ts` | `expander = useExpander()`；`startExpansion(currentPageItems())` 用 `candidatePromptRef`（当前候选对应的提示词）+ 候选词逐行解码；`scheduleCandidates` / `cancelCandidateWork` 都 `expander.clear()`；`pickCandidate` 插入 词 + rows[i].text |
 
 ```
@@ -256,7 +256,7 @@ C. 候选请求（runJob；调度策略见 candidateScheduler）
 D. 文本写入、大纲段起点同步、撤销重做
 E. 按文稿 ID 保存 / 导出 TXT（platform.api.saveDocumentAs）/ 返回首页
 F. 输入法（IME）兼容
-G. 编辑器事件与键盘（分页、穿透键、随机取词、插入候选）
+G. 编辑器事件与键盘（分页、长按隐藏键、长按展开键、数字键插入候选）
 H. 副作用：快捷键、自动保存、关窗落盘
 I. 查找替换 / 上下文 / 大纲段 / 章节 / Toast / 日志
 J. 渲染用的派生值
@@ -264,7 +264,7 @@ J. 渲染用的派生值
 
 状态镜像约定不变：每次渲染把 `content / title / context / settings / backendStatus / profile` 同步进同名 ref，异步回调一律读 ref。
 
-**布局**：`.topbar`（左：返回 / 目录开关 / 品牌 / 模型状态；右：工具列，末两位是「字体」与「字号」两个下拉，见 `components/FontPicker.tsx`）→ `main.workspace` [ChapterPanel?][SearchPanel?] `section.editor-stage`（眉题 + 可编辑章节标题 + 高亮层 + textarea）→ `WorkbenchPanel`（380px，单面板）→ `WorkbenchRail`（44px 图标栏）→ `footer.statusbar`。右键菜单项在 `openContextMenu` 时按当前选区计算（撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / 查找 / 立即取候选 / 把候选展开为短句 / 在此处分章 / 从这里新起大纲段 / 检查光标前的文字 / 校验这段的人设 / 建角色卡）。底栏显示「大纲段 i/n」与「… · 从段起点」。
+**布局**：`.topbar`（左：返回 / 目录开关 / 品牌 / 模型状态；右：工具列，末两位是「字体」与「字号」两个下拉，见 `components/FontPicker.tsx`）→ `main.workspace` [ChapterPanel?][SearchPanel?] `section.editor-stage`（眉题 + 可编辑章节标题 + 高亮层 + textarea）→ `WorkbenchPanel`（380px，单面板）→ `WorkbenchRail`（44px 图标栏）→ `footer.statusbar`。右键菜单项在 `openContextMenu` 时按当前选区计算（撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / 查找 / 立即取候选 / 把候选展开为短句 / 在此处分章 / 从这里新起大纲段 / 检查光标前的文字 / 建角色卡）。底栏显示「大纲段 i/n」与「… · 从段起点」。
 
 **对外接口**：
 ```ts
@@ -288,14 +288,14 @@ interface WritingEditorProps {
 textarea 输入
  → scheduler.schedule(job, delay)（普通模式等 triggerDelay；快速模式 0ms、浮层常驻）
      任何时刻最多 1 个在飞 + 1 个排队，新任务覆盖旧排队；cancel 时顺手 abort 在飞
- → runJob：buildPrompt(template 来自 ModelProfile) → provider(request, signal)
+ → runJob：buildPrompt(template + noThinkPrefix 来自 ModelProfile) → provider(request, signal)
      ├ realCandidateProvider：platform.api.getCandidates；abort 翻译成 cancelCandidates(requestId)
      └ mockCandidateProvider：词库 + 伪 logit（浏览器演示）
  → 主进程 candidates.ts：POST /completion { n_predict: 1, n_probs: topK+16, cache_prompt, id_slot: 0 }
      解码 bytes（严格 UTF-8，丢弃半字节碎片）、按 token id / profile.eosTexts 标记 isEos、过滤隐藏标记
  → renderer 竞态校验（controller 仍在飞、未组字、正文与光标未变）
  → postprocessCandidates：软化 → EOS 弱提醒计数（仅大纲模式）→ 去掉 EOS 再软化 → diversifyCandidates
- → CandidatePopover（分页、↑↓/Enter、随机取词键、穿透键淡化）
+ → CandidatePopover（分页、数字键插入、↑↓ 选择、长按隐藏键淡出、长按展开键展开短句、随机取词键可选）
 ```
 
 - `BACKEND_TOP_K = 100` 固定，前端分页；主进程上限 `MAX_TOP_K = 200`
@@ -315,35 +315,26 @@ textarea 输入
  → findingsToIssues：QuoteLocator 精确 → 去标点规范化 → ≥8 字最长公共子串 → 丢弃
  → 请求在飞期间的 EditSpan 依次回放 → mergeLlmIssues（窗口内旧问题替换、忽略过的不再出现）
 本地层：findLocalHints 在光标前 15k / 后 3k 范围内防抖重算（600 ms），kind = "local"
-渲染：grammar / consistency → deco-wavy；monotony / local → deco-band（tone 区分深浅）；光标落在问题上 → 底栏说明 + 面板卡片高亮
+渲染：grammar → deco-wavy；monotony / local → deco-band（tone 区分深浅）；光标落在问题上 → 底栏说明 + 面板卡片高亮
 ```
 
 - 问题只在内存里，不落盘；`Issue.key`（类型 + 规范化引用）用于「忽略」去重
 - 槽位：候选固定槽 0，纠错槽 1（`PROOFREAD_SLOT`）；`-c` 为总上下文，`/props.n_ctx` 已是单槽值
 - 本地层还查**专名写法**（`findNameVariants`）：与 ≥ 3 字的角色名 / 别名同长、恰差一字、且出现次数 ≤ 正名 1/3 且 ≤ 5 的写法（莱奥拉 / 莱奥菈）
 
-**人设校验**（同一管线，`useProofreader.runTask("consistency")`）：
-
-```
-触发：面板「校验当前窗口」/ 右键「校验这段的人设」（手动）或 consistencyAuto（纠错跑完后对同一窗口自动跑一次）
- → 同一 ProofWindow → findMaterialHits 只取 kind=character 的命中 → buildMaterialsText 拼设定卡（无命中：手动时报错、自动时跳过）
- → buildConsistencyPrompt(template, 设定卡, 窗口, noThinkPrefix) + CONSISTENCY_GRAMMAR（temperature 0.2, n_predict 320）
- → 槽 2（profile.slots ≥ 3，与纠错并行）否则槽 1（slotChainRef 每槽一条 Promise 队列，先来后到）
- → parseConsistencyFindings：角色名|引用|冲突项 / 无 → Issue{kind: consistency, message: "角色名：冲突项"}
- → mergeLlmIssues(…, kinds) 只替换窗口内同类问题：纠错结果与人设结果互不覆盖
-```
+**人设校验已删除**（2026-10-25）：小模型在这件事上误报漏报都高，而它又是全工程唯一把角色卡送进提示词的地方。人物与设定从此**永不与模型交互**：`lib/materials.ts` 的窗口命中 / 提及计数 / 建卡候选提取与 `lib/monotony.ts` 的本地提示照旧，`ContextTab` 改成纯信息展示（本窗口出现了哪些卡、各几次，并明确标注不进提示词）。删掉的还有卡片上的 `inject` 开关（大纲段的 `inject` 保留）、纠错第 3 槽与 `consistencyAuto` 设置。
 
 ### 5c. 短句展开（Expansion）
 
 ```
-触发：长按取样键（settings.expandEnabled，短按仍是随机取词、改在 keyup 执行）
+触发：长按展开键（settings.expandKey + holdMs，按住到点触发；短按就是正常输入这个键，字符在 keyup 补）
       或 停笔自动（settings.expandAuto：候选就绪且距最近一次操作 ≥ expandIdleMs；浮窗内 ↑↓ / 翻页也算操作、重新计时；翻到仍有未展开行的页会重新武装，已展开的页保留）
       或 右键「把候选展开为短句」
  → expander.start(候选提示词, 当前页候选[{index 全局序号, text}])
  → 逐行串行：POST /completion { prompt: 提示词 + 候选词, id_slot: 0, cache_prompt, stream: true,
       n_predict 24, temperature 0.6, top_p 0.9, repeat_penalty 1.1, stop: ，。！？；…\n }
       前缀全部命中槽 0 缓存 → 只解码；chunk 经 expand:chunk 推回，rows[index].text 原地增长
- → 行内显示 词 + 续写 + 闪烁光标；数字键 / Enter / 点击 = 插入 词 + 已流出的部分（流式中也可）
+ → 行内显示 词 + 续写 + 闪烁光标；数字键 / 点击 = 插入 词 + 已流出的部分（流式中也可；Enter 已交还给换行）
  → 任何文本 / 光标 / 候选变化 → clear()（abort → expand:cancel）；Esc 关浮窗同样清空
 ```
 
@@ -356,11 +347,13 @@ textarea 输入
 - 正文来源二选一：
   - **段起点模式**（该段正在注入）：`[段起点, cursor)` 一刀切不截断（旧锚点语义）；超 `anchorWarnLen` 提醒；超硬上限时 `anchorOffset = null` 退回滑窗、大纲照常注入（提示「新起一段大纲」），没有任何自动关开关的动作
   - **滑动窗口**：`[windowStart, cursor)`，上限 `maxBodyLen`，左边界懒推进（写够 `windowAdvanceMinChars` 且在换行后）以保护 KV cache
-- 硬上限 = `contextLen − 256 − 模板/风格/大纲字数`；`contextLen = profile.contextLength ?? settings.modelContextLen`（后端就绪后以实际 `n_ctx` 为准，设置里的滑杆只作兜底）
+- 硬上限 = `contextLen − 256 − 模板/风格/大纲/空思考块字数`（`promptOverheadChars`）；`contextLen = profile.contextLength ?? settings.modelContextLen`（后端就绪后以实际 `n_ctx` 为准，设置里的滑杆只作兜底）
 - 段起点稳定性：`mapSegmentsThroughEdit`（偏移 0 钉死；锚在标记行上的章首段只按偏移平移、不做指纹搜索；其余走 `mapAnchorThroughEdit` 48 字指纹校验 / 全文重找）；程序化章节操作用 `remapSegments(精确映射)`
 - 标记行永不送模型：候选 / 展开经 `stripChapterMarks` 整行删除；纠错窗口 `resolveProofWindow` 跳过起始标记行、窗口内标记行保持等长掩码
+- 素材永不进提示词：角色卡 / 设定条目只参与本地统计与面板展示（`lib/materials.ts`），`BuildPromptArgs` 里没有它们的位置
+- `BuiltPrompt.bodyChars` = 真正送出去的正文字数（`countChars`，已删标记行与空白），底栏「本次送入正文 N 字」用它，不再用 `bodyEnd - bodyStart` 的原始偏移差
 
-`ModelProfile { modelName, contextLength(每槽), slots, template, noThinkPrefix, eosTexts }` 由 `model:profile` 给出（`/props` 的 `n_ctx` + `total_slots` + `chat_template`，读不到时用 `-c ÷ --parallel`），`useBackendStatus` 在后端就绪后拉取一次并随状态缓存。`noThinkPrefix`（模板含 `<think>` 或 Qwen3.5 → `<think>\n\n</think>\n\n`）只用于指令类任务（纠错 / 校验）的 assistant 回合开头：否则有文法约束时模型会在第一个 token 坍缩成「无」。
+`ModelProfile { modelName, contextLength(每槽), slots, template, noThinkPrefix, eosTexts }` 由 `model:profile` 给出（`/props` 的 `n_ctx` + `total_slots` + `chat_template`，读不到时用 `-c ÷ --parallel`），`useBackendStatus` 在后端就绪后拉取一次并随状态缓存。`noThinkPrefix`（模板含 `<think>` 或 Qwen3.5 → `NO_THINK_PREFIX`）用在**三条链路**的 assistant 回合开头（续写 / 纠错 / 短句展开复用续写 prompt）：纠错没有它 + 文法约束会在第一个 token 坍缩成「无」（见文首事故记录），续写加上它是为了让 SFT 样本一套拼法覆盖全部任务。`DEFAULT_MODEL_PROFILE.noThinkPrefix` 是空串（后端未就绪 / 浏览器演示的兜底）。
 
 ### 7. 模型后端生命周期（main/backend.ts）
 
@@ -389,13 +382,15 @@ restart() = stop() + start()；由 setup:update-device / setup:apply-config / ba
 |------|------|
 | `main/setup.ts` | `getSetupState()`：调用 `readBackendConfig`，补上 exe / model 存在性与 `needsDeviceSelection` |
 | `main/catalog.ts` | 唯一的下载清单：`LLAMA_TAG`、镜像、`engineAssetsFor(kind, cuda)`、`MODEL_PRESETS`、`defaultTargetDir()`；`setup:get-catalog` 交给向导 |
-| `main/hardware.ts` | CPU 拓扑、GPU / 显存、推荐 cuda/rocm/vulkan/cpu 与线程数 |
-| `main/deploy.ts` | `parseDeployConfig` 校验入参；下载引擎 zip（CUDA 另加 cudart）与模型；`buildDefaultArgs(threads, contextLength)` 写 backend.json |
+| `main/hardware.ts` | CPU 拓扑、GPU / 显存、推荐引擎与线程数（NVIDIA → cuda；**AMD → vulkan**，不再默认 HIP/ROCm；Intel → vulkan；否则 cpu） |
+| `main/deploy.ts` | `parseDeployConfig` 校验入参；下载引擎 zip（CUDA 另加 cudart）与模型，解压到 `llama-cpp-<kind>/`（每种引擎一个目录，换引擎不会把两套 DLL 混在一起）；`buildDefaultArgs(threads, contextLength)` 写 backend.json（含 `kind`） |
 | `main/downloader.ts` | `downloadFile`：Range 续传、停滞超时、指数退避、跨源保留临时文件；`extractZip`：PowerShell `Expand-Archive`（参数数组传路径） |
 | `components/setup/SetupWizard.tsx` | 编排 4 步：硬件 → 引擎与模型（表单 `EngineModelForm`）→ 部署进度 → 设备；`startAt="device"` 时只渲染设备整页 |
 | `components/BackendSettingsPanel.tsx` | 首页弹窗：`getSetupState().existingConfig` → `splitStructuredArgs` 填表 → 编辑 exe / model / 端口 / -t / -c / --parallel / --device / 其它参数 → `composeArgs` → `setup:apply-config`；底部可「重新运行安装向导」。每槽上下文 < 4096 时拒绝保存 |
 
 设备选择单独一步：llama.cpp 的设备名（`ROCm0 / CUDA0 / Vulkan0`）取决于编译后端，无法从操作系统推断，因此部署后运行 `llama-server --list-devices` 让用户选，`setup:update-device(id | null)` 写回（null = 移除 `--device`）并重启后端。
+
+第 4 步会「验证启动」：写完设备后轮询 `backend:get-detail` 最多 30 秒，`error` 就留在本步显示原因 + 「重试启动 / 打开日志 / 改用 Vulkan 重新部署」。空设备列表分两种说法：GPU 引擎（cuda/rocm）时说明「引擎没有报告任何显卡」并给出换引擎按钮，Vulkan / CPU 引擎则维持「未检测到可用的 GPU 设备」。换引擎走 `setup:switch-engine`：模型原样复用、只补下载新引擎包、清掉 `--device` 后重启（新引擎的设备名不同）。
 
 ### 9. 设置（lib/settings.ts）
 
@@ -403,9 +398,12 @@ restart() = stop() + start()；由 setup:update-device / setup:apply-config / ba
 - 持久化：`localStorage['zixia-writing-settings-v3']`，读取时经 `sanitizeSettings` 收敛到合法范围
 - 数值范围只写一处 `SETTING_LIMITS`，`sanitize` 与 `SettingsPanel` 的滑杆共用
 - 主进程无设置；`modelContextLen` 只是后端读不到 `n_ctx` 时的兜底（面板会显示实际值）
-- 纠错开关 `proofreadAuto`（默认开）/ `proofreadLocal`（默认开）/ `consistencyAuto`（随纠错校验人设，默认关）放在纠错面板里，经 `onSettingChange` 回 App 持久化
-- **算力档位**（设置「基本」页顶部，`TierSetting`）：不单独存储，`detectTier()` 由 expandAuto / proofreadAuto / consistencyAuto 三项反推（都对不上 = 自定义）；点档位 = 批量写 `TIER_PRESETS[tier]`（含 expandIdleMs：高档 250 ms）。低 / 中 / 高 = 槽位 2 / 2 / 3（`TIER_SLOTS`）；高档且 `profile.slots < 3` 时提示去「模型与推理」加槽位（不自动改后端）
-- 短句展开开关 `expandEnabled`（默认开，长按取样键触发）/ `expandAuto`（停笔后自动展开，默认关）+ `expandIdleMs`（停笔多久，250 ms–10 s，默认 2 s；最小档 ≈ 候选一出就展开）在设置面板「基本」页
+- 纠错开关 `proofreadAuto`（默认开）/ `proofreadLocal`（默认开）放在纠错面板里，经 `onSettingChange` 回 App 持久化
+- **算力档位**（设置「基本」页顶部，`TierSetting`）：不单独存储，`detectTier()` 由 expandAuto / expandIdleMs / proofreadAuto 反推（对不上 = 自定义）；点档位 = 批量写 `TIER_PRESETS[tier]`（低 / 中 / 高只差 expandAuto、expandIdleMs 2000 / 2000 / 250、proofreadAuto）。三档都是 2 个槽位（槽 0 候选 + 展开、槽 1 纠错）；`profile.slots < 2` 时提示去「模型与推理」加槽位（不自动改后端）
+- 短句展开开关 `expandEnabled`（默认开，长按展开键触发）/ `expandAuto`（停笔后自动展开，默认关）+ `expandIdleMs`（停笔多久，250 ms–10 s，默认 2 s；最小档 ≈ 候选一出就展开）在设置面板「基本」页
+- **两个长按键**（设置「高级」页，`HoldKey` = 空格 / Tab / ` / \ / 不绑定）：`hideKey`（长按隐藏浮窗 = 走「浮窗淡化」，默认空格）与 `expandKey`（长按展开短句，默认 `），`holdMs`（150–600 ms，默认 260）两者共用。**短按 = 正常输入该键**（keyup 时补字符，`holdKeyChar`），所以 Tab 不再被劫持、Enter 只管换行、插入候选只用数字键 1–9；两键绑成同一个时隐藏优先，面板给出警告。旧档的 `peekKey` / `peekHoldMs` 由 `sanitizeSettings` 回退（`holdMs` 继承 `peekHoldMs`）
+- **随机取词键 `sampleKey`**（同页，默认**不绑定**）：浮窗打开时按它，`sampleByProbability` 按软化后的概率从全部候选里抽一个插入；绑到长按键上时短按 = 取词（不再补该键字符）、长按仍是隐藏/展开，面板给说明。旧档遗留值若与两个长按键冲突则回退为不绑定
+- `fadeOpacity`（`.is-faded`，pointer-events 一并让出）作用于两种情况：长按隐藏浮窗键期间（`holdFaded`）、以及「浮窗常驻」时输入法组字。淡化期间按键全部放行给正文，松开立刻恢复
 - 字体下拉由 `listLocalCjkFonts(force?)` 现测（`FontPicker` 底部的「检测到 N 款中文字体 + 重新检测」就是它的结果；装了新字体点一下即可，不必重启）
 - 名字来源三处：`CANDIDATES`（约 70 个常见中文名）、主进程 `fonts:list`（GDI+ 族名 + 注册表字体表，见 `src/main/fonts.ts`）、网页演示的 `navigator.queryLocalFonts()`；三者都只提供**候选名字**，装没装由逐像素签名判定（混排样本判存在、纯汉字样本判中文字形，与兜底像素相同的再按名字特征兜一次），指纹相同则视为同一款字体去重
 - 正文观感两项：`fontSize`（16–22 px，默认 18）与 `fontFamily`（本机字体族名，默认空 = 衬线栈）。顶栏两个下拉与设置面板「基本」页改的是同一份值；字体只写进 `--editor-font-family`，不进文稿、不进提示词，界面其它文字的字体写死（见 lib/fonts.ts / components/FontPicker.tsx）
@@ -447,12 +445,12 @@ interface BookRef { id; title; volume }                       // volume 从 0 �
 interface LibraryEntry { id; title; excerpt; sourceFormat; characterCount; updatedAt; interactedAt; book?: BookRef }
 
 // shared/materials.ts
-interface CharacterCard { id; name; aliases; group: 'main'|'minor'; background; personality; appearance; extra: {label,text}[]; inject }
-interface LoreEntry { id; name; aliases; category: 'place'|'org'|'item'|'other'; text; inject }
+interface CharacterCard { id; name; aliases; group: 'main'|'minor'; background; personality; appearance; extra: {label,text}[] }
+interface LoreEntry { id; name; aliases; category: 'place'|'org'|'item'|'other'; text }
 interface Materials { characters: CharacterCard[]; lore: LoreEntry[] }
 interface LibraryDirectory { path; isDefault }
 
-interface BackendConfig { exe; model; port; args: string[]; startupTimeoutSec }
+interface BackendConfig { exe; model; port; args: string[]; startupTimeoutSec; kind?: BackendKind }
 interface SetupState { configured; configPath; problem?; message; existingConfig?; needsDeviceSelection? }
 interface SetupCatalog { engineTag; models: ModelPreset[]; defaultTargetDir; defaultContextLength }
 interface DeployConfig { targetDir; backendKind; cudaVersion?; modelUrl; localModelPath?; localExePath?; threads; contextLength? }
@@ -475,7 +473,7 @@ interface ModelProfile { modelName; contextLength: number | null /* 每槽 */; s
 interface CompletionRequest { requestId; prompt; idSlot; nPredict; temperature?; topP?; stop?; grammar? }
 interface CompletionResult { text; stopType: 'eos' | 'limit' | 'word' | 'cancelled'; stopWord?; timings? }
 // 纠错（lib/proofread.ts）
-interface Issue { id; kind: 'grammar' | 'monotony' | 'consistency' | 'local'; source: 'llm' | 'local'; ranges: {start,end}[]; quote; message; suggestion?; key }
+interface Issue { id; kind: 'grammar' | 'monotony' | 'local'; source: 'llm' | 'local'; ranges: {start,end}[]; quote; message; suggestion?; key }
 ```
 
 ### renderer 专有（lib/types.ts）
@@ -515,14 +513,14 @@ const [backendSettingsOpen, setBackendSettingsOpen] = useState(false) // 「模�
 const [title]; const [content]; const [selection]; const [context] = useState<ContextState>(…)
 // 候选
 const [candidateList]; const [globalIndex]; const [candidateOpen]; const [candidateLoading]
-const [candidateError]; const [candidateNotice]; const [peekActive]
+const [candidateError]; const [candidateNotice]; const [holdFaded]   // 长按隐藏键期间浮窗走 .is-faded 淡化
 // 抽出去的
 const scheduler = useState(() => new CandidateScheduler(supportsCancel))   // C 段
 const { saveStatus, markDirty, save, saveRef } = useVersionedSave(persist) // E 段
 const history = useEditHistory(() => snapshot)                            // D 段
 // 滑窗
 const windowStartRef / writtenSinceUpdateRef
-// 纠错 + 人设校验（lib/useProofreader.ts 内部）：llmIssues / localIssues / status / consistencyStatus + windowStartRef / writtenRef / dismissedRef / pendingSpansRef(按任务) / slotChainRef(按槽位)
+// 纠错（lib/useProofreader.ts 内部）：llmIssues / localIssues / status + contentRef / windowStartRef / writtenRef / dismissedRef / controllerRef（单任务、固定槽 1）
 const proofreader = useProofreader(…)
 ```
 
@@ -633,7 +631,7 @@ npm run start          # electron-vite preview
 审计记录与处理结果见 `report.md`。
 
 1. **无测试**：`promptBuilder`、`editorText`、`candidateDiversity`、`candidatePostprocess`、`backendArgs`、`downloader` 均为纯逻辑但无单测。
-2. **WritingEditor 仍有约 2100 行**：IME、键盘、文本写入三段仍交织在组件内（纠错逻辑已抽到 `useProofreader`）。
+2. **WritingEditor 仍有约 2250 行**：IME、键盘、文本写入三段仍交织在组件内（纠错逻辑已抽到 `useProofreader`）。
 6. **纠错依赖 ≥ 2 个槽位**：旧配置（`--parallel 1`）下面板提示去「模型与推理」改；`-c` 为总上下文，开 2 槽位要相应翻倍。
 3. **只支持 Windows**：主进程多处 PowerShell / WMI / `tasklist`，不是平台抽象的问题而是产品定位。
 4. **ModelProfile 的模板识别是启发式**：靠 `chat_template` 关键字与模型名，新模型家族需要在 `shared/modelProfile.ts` 加分支。
@@ -646,10 +644,9 @@ npm run start          # electron-vite preview
 - [ ] 为 `promptBuilder.ts`、`editorText.ts`、`candidateDiversity.ts`、`candidatePostprocess.ts`、`backendArgs.ts` 添加单元测试
 - [ ] 继续拆 WritingEditor：IME + 键盘处理（F、G 段）可抽成 `useEditorKeyboard`
 - [ ] ModelProfile 增加对更多模板（Mistral / DeepSeek）的识别
-- [ ] 右键菜单「立即取候选」（plan.md §2.6 里剩下的一项）
-- [ ] 人设校验在真机上的行格式 / 误报率调校（与纠错同样的「一律回无」检查步骤见文首）
-- [ ] 可选：长按数字键只展开那一行（一次解码）
+- [ ] 右键菜单「立即取候选」（尚未做）
+- [ ] 可选：长按某个数字键只展开那一行（一次解码；目前长按展开键是整页串行）
 
 ---
 
-*本文档基于 commit 7689b52 之后的重构代码状态生成。最后更新：2026-10-14*
+*本文档基于 commit 7689b52 之后的重构代码状态生成。最后更新：2026-10-28（三条链路统一空思考块、素材退出提示词与人设校验删除、长按键改造）*
