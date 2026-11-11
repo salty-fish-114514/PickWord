@@ -10,9 +10,11 @@
 
 - `shared/modelProfile.ts` 的 `detectNoThinkPrefix()` 为相应模板/模型提供 `NO_THINK_PREFIX`。
 - 候选续写、纠错、短句展开三条链路必须保持 assistant 回合前缀一致；短句展开复用续写提示词。
-- 训练样本的回合格式需与运行时逐字节一致，包括 `assistantOpen` 后的空思考块、大纲、`正文：\n` 等前导文本及换行。约束解码只会重新分配合法 token 的概率，不能弥补训练与推理格式错位。
-- 遇到模型反复输出同一个短答案，先核对 `predicted_n`、模型原话和实际 prompt 的字节级结构，再判断模型能力。
-- 设计 GBNF 时，避免让单 token 的「无」成为明显更容易的提前退出分支；需要时平衡样本比例，或让所有合法答案先输出共同的非平凡前缀。
+- 训练样本的回合格式需与运行时逐字节一致，包括 `assistantOpen` 后的空思考块、前导文本及换行。约束解码只会重新分配合法 token 的概率，不能弥补训练与推理格式错位。
+- 纠错提示词协议版本为 `proofread-paragraph-v2`，完整拼接在 `renderer/src/lib/proofread.ts`；每次请求的非空段落从 `[0]` 编号。每次最多报告数在纠错面板调节（8–40，默认 20），请求日志版本串包含所选上限。SFT 必须复用完整运行 prompt 和协议版本，而不是只拿 system 文案与正文训练；`npm run probe` 会生成 `proofread-prompt-structures.md`，列出所有支持模板的完整样例。
+- 纠错仍用 `noThinkPrefix`，A/B/无 GBNF 输出；A 改法必须是和引用同范围的最小替换，保证编辑器接受建议不会把整句覆盖到片段范围。
+- 遇到模型反复输出同一个短答案，先核对 `prompt_version`、`predicted_n`、模型原话和实际 prompt 的回合结构，再判断模型能力。
+- 纠错 completion 经 SSE 流式接收；重复输出保护触发或到达 `n_predict` 时只保留完整闭合行，并在 UI 标记为部分结果。
 
 改动提示词/窗口/素材处理后运行 `npm run probe`，人工检查探针打印出的实际字符串；不要只凭 UI 或提示词模板猜测最终发给模型的内容。
 
@@ -67,7 +69,8 @@ PickWord/
     │   ├── backend.ts           # llama-server 生命周期、健康检查、日志与状态
     │   ├── loadProgress.ts      # 加载阶段、历史耗时平滑与 ETA
     │   ├── candidates.ts        # 槽 0 候选生成、模型画像与候选过滤
-    │   ├── llm.ts               # 一次性 completion（纠错等槽 1 后台任务）
+    │   ├── llm.ts               # SSE completion（纠错等槽 1 后台任务）
+    │   ├── proofreadGuard.ts    # 纠错流式重复输出保护
     │   ├── expand.ts            # 槽 0 流式短句展开
     │   ├── sse.ts               # SSE 流解析
     │   ├── library.ts           # 文库/书卷文件读写、迁移与索引
@@ -137,7 +140,7 @@ PickWord/
 ### 候选、纠错与展开
 
 - **候选：** `WritingEditor → promptBuilder → candidateScheduler/provider → IPC candidates:get → main/candidates → 本机 /completion`。固定使用槽 0；renderer 做竞态检查、EOS 处理、概率软化和多样化，再交给 `CandidatePopover`。`main/candidates.ts` 候选请求设置 `n_probs`，并显式关闭 `speculative.type`：llama.cpp b8868 的 speculative 解码分支尚未填充 token 概率，故无法构造 `completion_probabilities`。无输出 / EOS 且无概率字段时仍有限重试一次；最终错误携带请求与响应概率参数及停止元数据。
-- **纠错：** `useProofreader → proofread.ts` 选择窗口并构造提示词/GBNF → `llm:complete → main/llm.ts`，使用槽 1。结果通过引用定位到正文区间；本地单调/专名提示在 `monotony.ts` 运行，不依赖模型。
+- **纠错：** `useProofreader → proofread.ts` 选择窗口、按 0 起始编号段落并构造固定版本提示词/GBNF → `llm:complete → main/llm.ts`，使用槽 1 与 SSE 重复保护。结果按段号 + 引文定位到正文区间；达到上限或循环保护时只保留完整行并标记部分结果。本地单调/专名提示在 `monotony.ts` 运行，不依赖模型。
 - **短句展开：** `useExpander → expansion.ts → expand:start → main/expand.ts`，复用候选提示词并使用槽 0 流式逐条展开。
 - 人物与设定卡仅用于本地窗口命中、提及计数及面板展示；不注入模型提示词。
 - `ModelProfile` 从 llama-server `/props` 获取模板、上下文长度、槽位和 EOS 信息；模板/模型家族识别是启发式，增加家族时改 `shared/modelProfile.ts` 与 `main/candidates.ts`。
@@ -190,7 +193,8 @@ PickWord/
 - 当前双页使用 CSS `content-visibility: auto`，**尚未做视口 DOM 虚拟化**：所有正文页仍挂载，不能把屏外绘制优化等同于减少 DOM 节点。窗口尺寸变化采用 120 ms trailing debounce；字体/版式指标变化仍会触发重分页。
 - **查找路径：** `useSearchWorker.ts` 在查找面板开启时通过 Vite 打包的 `workers/search.worker.ts` 扫描全文；查询防抖、分块让出并取消过期请求，偏移用 `Uint32Array` 传回。正文仅在变化时发送；结果无上限，`SearchPanel.tsx` 每次只渲染 75 条。
 - 普通文本编辑会增量更新字数与章节索引（`shared/text.ts`、`chapters.ts`）；撤销/重做由 `useEditHistory.ts` 保存差分帧，`useVersionedSave.ts` 用版本号协调自动 / 手动保存，`flushRegistry.ts` 管理关窗落盘。
-- `editorText.ts` 提供编辑差分、光标 / 查找偏移与锚点映射；`decorations.ts` 把大纲锚点、纠错和本地提示转换为文本装饰。
+- `editorText.ts` 提供编辑差分、光标 / 查找偏移与锚点映射；`decorations.ts` 把大纲锚点、纠错和本地提示转换为文本装饰。纠错/重复区间用 CSS Custom Highlight 绘制在纯文本镜像上，不把 issue 文本拆成 span。零宽大纲锚点只在镜像中绘制；`splitByDecorations` 必须在每个零宽锚点后推进文本游标，否则每个锚点都会重复前缀文本并破坏所有后续 offset。
+- 单页正文自动扩展到全文高度，滚动统一交给外层 `.editor-stage`；不要恢复 textarea 内层滚动或截断高亮镜像。镜像全文 UTF-16 长度必须与 source text 相同。章节批量改名/重编号需把精确 offset map 传给纠错区间迁移，不要只用一个粗略的 common-prefix/suffix diff。双页 Range 仍只落在纯文本镜像上，避免直接遍历 `contenteditable` 包装节点。
 - `components/workbench/Workbench.tsx` 分发右侧工作台 tab：`ContextTab`、`OutlineTab`、`CharactersTab`、`LoreTab`、`ProofreadTab`。
 - CSS 入口 `src/renderer/src/index.css` 只按 `base → editor → library → settings → setup` 顺序导入五份样式。
 
