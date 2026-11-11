@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-labelledby="title desc">
+  <title id="title">付款码占位图</title>
+  <desc id="desc">请替换为你的真实付款码。本图不可用于付款。</desc>
+  <rect width="320" height="320" rx="18" fill="#fffdf8"/>
+  <rect x="12" y="12" width="296" height="296" rx="12" fill="none" stroke="#9b8c72" stroke-width="2" stroke-dasharray="8 7"/>
+  <g fill="none" stroke="#9b8c72" stroke-width="3" stroke-linecap="round" opacity=".68">
+    <path d="M88 130v-18a8 8 0 0 1 8-8h18M232 130v-18a8 8 0 0 0-8-8h-18M88 190v18a8 8 0 0 0 8 8h18M232 190v18a8 8 0 0 1-8 8h-18"/>
+  </g>
+  <circle cx="160" cy="151" r="25" fill="#f0eadf"/>
+  <path d="M160 135v32m-16-16h32" stroke="#7b6d59" stroke-width="4" stroke-linecap="round"/>
+  <text x="160" y="204" text-anchor="middle" fill="#40392f" font-family="sans-serif" font-size="18" font-weight="700">付款码占位图</text>
+  <text x="160" y="231" text-anchor="middle" fill="#807665" font-family="sans-serif" font-size="12">请替换为真实收款码</text>
+  <text x="160" y="253" text-anchor="middle" fill="#a49a8a" font-family="sans-serif" font-size="11">这张图目前收不到钱</text>
+</svg>
