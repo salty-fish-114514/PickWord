@@ -58,7 +58,7 @@ export function UpdateDialog({ updater }: { updater: UpdaterState }) {
             </>
           ) : phase === "ready" || phase === "installing" ? (
             <>
-              <p>v{info.latest} 已下载完成。现在安装会关闭紫霞写作并静默覆盖安装。</p>
+              <p>v{info.latest} 已下载完成。现在安装会关闭 PickWord 并静默覆盖安装。</p>
               <p className="setup-hint">你的设置、文库和已部署的模型都不会被改动。</p>
             </>
           ) : info.available ? (
